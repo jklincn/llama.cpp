@@ -191,8 +191,8 @@ struct ggml_backend_registry {
         register_backend(ggml_backend_cpu_reg());
 #endif
     }
-
     ~ggml_backend_registry() {
+
         // FIXME: backends cannot be safely unloaded without a function to destroy all the backend resources,
         // since backend threads may still be running and accessing resources from the dynamic library
         for (auto & entry : backends) {
@@ -487,12 +487,14 @@ static fs::path backend_filename_extension() {
 
 static ggml_backend_reg_t ggml_backend_load_best(const char * name, bool silent, const char * user_search_path) {
     // enumerate all the files that match [lib]ggml-name-*.[so|dll] in the search paths
+    // 根据传入的后端名称构建文件前缀和扩展名
     const fs::path name_path = fs::u8path(name);
     const fs::path file_prefix = backend_filename_prefix().native() + name_path.native() + fs::u8path("-").native();
     const fs::path file_extension = backend_filename_extension();
 
     std::vector<fs::path> search_paths;
     if (user_search_path == nullptr) {
+        // 两个默认路径
         // default search paths: executable directory, current directory
         search_paths.push_back(get_executable_path());
         search_paths.push_back(fs::current_path() / "");
@@ -508,6 +510,7 @@ static ggml_backend_reg_t ggml_backend_load_best(const char * name, bool silent,
             GGML_LOG_DEBUG("%s: search path %s does not exist\n", __func__, path_str(search_path).c_str());
             continue;
         }
+        // 遍历每个搜索路径中的所有文件
         fs::directory_iterator dir_it(search_path, fs::directory_options::skip_permission_denied);
         for (const auto & entry : dir_it) {
             if (entry.is_regular_file()) {
@@ -519,6 +522,7 @@ static ggml_backend_reg_t ggml_backend_load_best(const char * name, bool silent,
                         GGML_LOG_ERROR("%s: failed to load %s\n", __func__, path_str(entry.path()).c_str());
                     }
                     if (handle) {
+                        // 从库中查找名为 ggml_backend_score 的函数
                         auto score_fn = (ggml_backend_score_t) dl_get_sym(handle.get(), "ggml_backend_score");
                         if (score_fn) {
                             int s = score_fn();

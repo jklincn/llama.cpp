@@ -62,6 +62,7 @@ static bool file_is_empty(const std::string & path) {
     return f.tellg() == 0;
 }
 
+// 捕获 Ctrl+C 中断
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
 static void sigint_handler(int signo) {
     if (signo == SIGINT) {
@@ -84,14 +85,17 @@ static void sigint_handler(int signo) {
 #endif
 
 int main(int argc, char ** argv) {
+    // 解析命令行参数
     common_params params;
     g_params = &params;
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_MAIN, print_usage)) {
         return 1;
     }
 
+    // 初始化，看起来只有日志初始化
     common_init();
 
+    // 采样参数
     auto & sparams = params.sampling;
 
     // save choice to use color for later
@@ -130,7 +134,9 @@ int main(int argc, char ** argv) {
 
     LOG_INF("%s: llama backend init\n", __func__);
 
+    // 后端初始化
     llama_backend_init();
+    // numa 初始化
     llama_numa_init(params.numa);
 
     llama_model * model = nullptr;
@@ -143,8 +149,10 @@ int main(int argc, char ** argv) {
 
     std::vector<common_chat_msg> chat_msgs;
 
+    // 模型加载
     // load the model and apply lora adapter, if any
     LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
+    // 模型参数
     common_init_result llama_init = common_init_from_params(params);
 
     model = llama_init.model.get();
@@ -562,9 +570,11 @@ int main(int argc, char ** argv) {
         embd_inp.push_back(decoder_start_token_id);
     }
 
+    // 主循环
     while ((n_remain != 0 && !is_antiprompt) || params.interactive) {
         // predict
         if (!embd.empty()) {
+            // ... 处理当前输入的 token
             // Note: (n_ctx - 4) here is to match the logic for commandline prompt handling via
             // --prompt or --file which uses the same value.
             int max_embd_size = n_ctx - 4;
@@ -585,6 +595,7 @@ int main(int argc, char ** argv) {
                 // - take the n_keep first tokens from the original prompt (via n_past)
                 // - take half of the last (n_ctx - n_keep) tokens and recompute the logits in batches
 
+                // 上下文管理
                 if (n_past + (int) embd.size() >= n_ctx) {
                     if (!params.ctx_shift){
                         LOG_DBG("\n\n%s: context full and context shift is disabled => stopping\n", __func__);
@@ -698,7 +709,7 @@ int main(int argc, char ** argv) {
 
                 LOG_DBG("saved session to %s\n", path_session.c_str());
             }
-
+            // 使用采样器生成新的 token
             const llama_token id = common_sampler_sample(smpl, ctx, -1);
 
             common_sampler_accept(smpl, id, /* accept_grammar= */ true);
@@ -832,6 +843,7 @@ int main(int argc, char ** argv) {
                 }
             }
 
+            // 在交互模式下，等待并处理用户输入
             if ((n_past > 0 || waiting_for_first_input) && is_interacting) {
                 LOG_DBG("waiting for user input\n");
 

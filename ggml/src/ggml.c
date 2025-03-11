@@ -1415,6 +1415,8 @@ struct ggml_context * ggml_init(struct ggml_init_params params) {
         // initialize time system (required on Windows)
         ggml_time_init();
 
+        // 预计算 fp16 -> fp32 转换结果
+        // 后续在 ggml 计算时，可以直接查表而不需要每次都计算转换，提高效率
         for (int i = 0; i < (1 << 16); ++i) {
             union {
                 uint16_t u16;
@@ -1423,20 +1425,25 @@ struct ggml_context * ggml_init(struct ggml_init_params params) {
             ggml_table_f32_f16[i] = GGML_COMPUTE_FP16_TO_FP32(u.fp16);
         }
 
+        // 防止后续调用时重复初始化
         is_first_call = false;
     }
 
     ggml_critical_section_end();
 
+    // 分配 ggml_context 结构体
     struct ggml_context * ctx = GGML_MALLOC(sizeof(struct ggml_context));
 
     // allow to call ggml_init with 0 size
+    // 允许传入 mem_size=0，默认对齐到 GGML_MEM_ALIGN
     if (params.mem_size == 0) {
         params.mem_size = GGML_MEM_ALIGN;
     }
 
+    // 计算最终需要的 mem_size
     const size_t mem_size = params.mem_buffer ? params.mem_size : GGML_PAD(params.mem_size, GGML_MEM_ALIGN);
 
+    // 结构体初始化
     *ctx = (struct ggml_context) {
         /*.mem_size           =*/ mem_size,
         /*.mem_buffer         =*/ params.mem_buffer ? params.mem_buffer : ggml_aligned_malloc(mem_size),

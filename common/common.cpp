@@ -902,6 +902,7 @@ std::string fs_get_cache_file(const std::string & filename) {
 //
 struct common_init_result common_init_from_params(common_params & params) {
     common_init_result iparams;
+    // 模型实例参数
     auto mparams = common_model_params_to_llama(params);
 
     llama_model * model = nullptr;
@@ -911,6 +912,7 @@ struct common_init_result common_init_from_params(common_params & params) {
     } else if (!params.model_url.empty()) {
         model = common_load_model_from_url(params.model_url, params.model, params.hf_token, mparams);
     } else {
+        // 从文件加载
         model = llama_model_load_from_file(params.model.c_str(), mparams);
     }
 

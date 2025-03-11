@@ -560,6 +560,7 @@ static std::string list_builtin_chat_templates() {
 
 common_params_context common_params_parser_init(common_params & params, llama_example ex, void(*print_usage)(int, char **)) {
     // load dynamic backends
+    // 加载ggml后端
     ggml_backend_load_all();
 
     common_params_context ctx_arg(params);
