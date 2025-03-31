@@ -256,6 +256,7 @@ void ggml_backend_cpu_set_abort_callback(ggml_backend_t backend_cpu, ggml_abort_
 struct ggml_backend_cpu_device_context {
     std::string description = "CPU";
 
+    // 构造函数
     ggml_backend_cpu_device_context() {
 #ifdef __APPLE__
         size_t len = 0;
@@ -264,6 +265,7 @@ struct ggml_backend_cpu_device_context {
             sysctlbyname("machdep.cpu.brand_string", &description[0], &len, NULL, 0); // NOLINT
         }
 #elif defined(__linux__)
+        // 通过 proc 获取到 CPU 信息
         FILE * f = fopen("/proc/cpuinfo", "r");
         if (f) {
             char buf[1024];
@@ -278,6 +280,7 @@ struct ggml_backend_cpu_device_context {
                         while (std::isspace(p[strlen(p) - 1])) {
                             p[strlen(p) - 1] = '\0';
                         }
+                        // 保存到 description 中
                         description = p;
                         break;
                     }
@@ -470,9 +473,12 @@ static size_t ggml_backend_cpu_reg_get_device_count(ggml_backend_reg_t reg) {
     GGML_UNUSED(reg);
 }
 
+// 从 reg 获取到 device
 static ggml_backend_dev_t ggml_backend_cpu_reg_get_device(ggml_backend_reg_t reg, size_t index) {
+    // CPU 这索引确保为 0
     GGML_ASSERT(index == 0);
 
+    // 初始化上下文，这里保存了 CPU 信息
     static ggml_backend_cpu_device_context ctx;
     static ggml_backend_device ggml_backend_cpu_device = {
         /* .iface   = */ ggml_backend_cpu_device_i,
@@ -633,6 +639,7 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     GGML_UNUSED(reg);
 }
 
+// 定义 CPU 后端寄存器的接口
 static const struct ggml_backend_reg_i ggml_backend_cpu_reg_i = {
     /* .get_name         = */ ggml_backend_cpu_reg_get_name,
     /* .get_device_count = */ ggml_backend_cpu_reg_get_device_count,
@@ -640,10 +647,12 @@ static const struct ggml_backend_reg_i ggml_backend_cpu_reg_i = {
     /* .get_proc_address = */ ggml_backend_cpu_get_proc_address,
 };
 
+// 第一次调用时注册 CPU 后端
 ggml_backend_reg_t ggml_backend_cpu_reg(void) {
     // init CPU feature detection
     ggml_cpu_init();
 
+    // 构造 CPU 后端寄存器
     static struct ggml_backend_reg ggml_backend_cpu_reg = {
         /* .api_version = */ GGML_BACKEND_API_VERSION,
         /* .iface       = */ ggml_backend_cpu_reg_i,

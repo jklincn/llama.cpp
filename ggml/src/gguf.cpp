@@ -221,11 +221,13 @@ struct gguf_reader {
 
     gguf_reader(FILE * file) : file(file) {}
 
+    // 基本泛型读取
     template <typename T>
     bool read(T & dst) const {
         return fread(&dst, 1, sizeof(dst), file) == sizeof(dst);
     }
 
+    // 向量读取
     template <typename T>
     bool read(std::vector<T> & dst, const size_t n) const {
         dst.resize(n);
@@ -272,6 +274,14 @@ struct gguf_reader {
         return true;
     }
 
+    // 对于 gguf_string_t 的特殊读取
+    // struct gguf_string_t {
+    //     // The length of the string, in bytes.
+    //     uint64_t len;
+    //     // The string as a UTF-8 non-null-terminated string.
+    //     char string[len];
+    // };
+    // 先读长度，再根据长度进行读取
     bool read(std::string & dst) const {
         uint64_t size = -1;
         if (!read(size)) {
@@ -317,6 +327,10 @@ bool gguf_read_emplace_helper(const struct gguf_reader & gr, std::vector<struct 
 }
 
 struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_params params) {
+    // 创建文件读取器和GGUF上下文，并设置状态标志。
+    fprintf(stderr, "DEBUG: params.ctx = %p, *params.ctx = %p\n", 
+        (void*)params.ctx, (void*)(params.ctx ? *params.ctx : NULL));
+
     const struct gguf_reader gr(file);
     struct gguf_context * ctx = new gguf_context;
 
@@ -333,6 +347,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             return nullptr;
         }
 
+        // 比对 magic
         for (uint32_t i = 0; i < magic.size(); i++) {
             if (magic[i] != GGUF_MAGIC[i]) {
                 fprintf(stderr, "%s: invalid magic characters: '%c%c%c%c', expected 'GGUF'\n", __func__, magic[0], magic[1], magic[2], magic[3]);
@@ -346,6 +361,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
     int64_t n_kv      = 0;
     int64_t n_tensors = 0;
 
+    // 读取版本号
     if (ok && gr.read(ctx->version)) {
         if (ctx->version == 1) {
             fprintf(stderr, "%s: GGUFv1 is no longer supported, please use a more up-to-date version\n", __func__);
@@ -360,6 +376,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
         ok = false;
     }
 
+    // 读取 tensor_count 
     if (ok && gr.read(n_tensors)) {
         static_assert(sizeof(size_t) <= 8 && sizeof(gguf_tensor_info) >= 2, "int64_t insufficient for indexing");
         if (n_tensors < 0 || n_tensors > int64_t(SIZE_MAX/sizeof(gguf_tensor_info))) {
@@ -371,6 +388,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
         ok = false;
     }
 
+    // 读取 metadata_kv_count
     if (ok && gr.read(n_kv)) {
         static_assert(sizeof(size_t) <= 8 && sizeof(gguf_tensor_info) >= 2, "int64_t insufficient for indexing");
         if (n_kv < 0 || n_kv > int64_t(SIZE_MAX/sizeof(gguf_kv))) {
@@ -388,7 +406,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
         return nullptr;
     }
 
-    // KV pairs
+    // 读取键值对
     {
         for (int64_t i = 0; ok && i < n_kv; ++i) {
             std::string key;
@@ -397,6 +415,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             uint64_t    n        = 1;
 
             try {
+                // 读取键名称
                 ok = ok && gr.read(key);
             } catch (std::length_error &) {
                 fprintf(stderr, "%s: encountered length_error while reading key %" PRIi64 "\n", __func__, i);
@@ -405,6 +424,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
                 fprintf(stderr, "%s: encountered bad_alloc error while reading key %" PRIi64 "\n", __func__, i);
                 ok = false;
             }
+            // 检查是否有重复的键名
             for (size_t j = 0; ok && j < ctx->kv.size(); ++j) {
                 if (key == ctx->kv[j].key) {
                     fprintf(stderr, "%s: duplicate key '%s' for tensors %zu and %" PRIi64 " \n", __func__, key.c_str(), j, i);
@@ -415,16 +435,20 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
                 break;
             }
 
+            // 读取值类型
             ok = ok && gr.read(type);
+            // 处理数组类型
+            // 这里应该可以参照 https://github.com/ggml-org/ggml/blob/master/docs/gguf.md 中的 gguf_metadata_value_t
             if (type == GGUF_TYPE_ARRAY) {
                 is_array = true;
-                ok = ok && gr.read(type);
-                ok = ok && gr.read(n);
+                ok = ok && gr.read(type); // 数组元素类型
+                ok = ok && gr.read(n); // 数组元素数量
             }
             if (!ok) {
                 break;
             }
 
+            // 根据类型读取值并加入到 ctx->kv 中
             switch (type) {
                 case GGUF_TYPE_UINT8:   ok = ok && gguf_read_emplace_helper<uint8_t>    (gr, ctx->kv, key, is_array, n); break;
                 case GGUF_TYPE_INT8:    ok = ok && gguf_read_emplace_helper<int8_t>     (gr, ctx->kv, key, is_array, n); break;
@@ -452,8 +476,10 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             gguf_free(ctx);
             return nullptr;
         }
+        // 确保读取到的键值对和预期数量一致
         GGML_ASSERT(int64_t(ctx->kv.size()) == n_kv);
 
+        // 读取对齐方式
         const int alignment_idx = gguf_find_key(ctx, GGUF_KEY_GENERAL_ALIGNMENT);
         ctx->alignment = alignment_idx == -1 ? GGUF_DEFAULT_ALIGNMENT : gguf_get_val_u32(ctx, alignment_idx);
 
@@ -465,13 +491,37 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
     }
 
     // read the tensor info
+    // 读取张量信息
+    // struct gguf_tensor_info_t {
+    //     // The name of the tensor. It is a standard GGUF string, with the caveat that
+    //     // it must be at most 64 bytes long.
+    //     gguf_string_t name;
+    //     // The number of dimensions in the tensor.
+    //     // Currently at most 4, but this may change in the future.
+    //     uint32_t n_dimensions;
+    //     // The dimensions of the tensor.
+    //     uint64_t dimensions[n_dimensions];
+    //     // The type of the tensor.
+    //     ggml_type type;
+    //     // The offset of the tensor's data in this file in bytes.
+    //     //
+    //     // This offset is relative to `tensor_data`, not to the start
+    //     // of the file, to make it easier for writers to write the file.
+    //     // Readers should consider exposing this offset relative to the
+    //     // file to make it easier to read the data.
+    //     //
+    //     // Must be a multiple of `ALIGNMENT`. That is, `align_offset(offset) == offset`.
+    //     uint64_t offset;
+    // };
     for (int64_t i = 0; ok && i < n_tensors; ++i) {
         struct gguf_tensor_info info;
 
         // tensor name
         {
+            // 读取张量名称
             std::string name;
             try {
+                // 这里的 read 是特殊实现
                 ok = ok && gr.read(name);
             } catch (std::length_error &) {
                 fprintf(stderr, "%s: encountered length_error while reading tensor name %" PRIi64 "\n", __func__, i);
@@ -488,6 +538,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             ggml_set_name(&info.t, name.c_str());
 
             // make sure there are no duplicate tensor names
+            // 确保无重复张量名
             for (int64_t j = 0; ok && j < i; ++j) {
                 if (strcmp(info.t.name, ctx->info[j].t.name) == 0) {
                     fprintf(stderr, "%s: duplicate tensor name '%s' for tensors %" PRIi64 " and %" PRIi64 "\n", __func__, info.t.name, j, i);
@@ -500,8 +551,10 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             break;
         }
 
+        // 读取张量形状
         // tensor shape
         {
+            // 读取张量维度，目前最大是 4
             uint32_t n_dims = -1;
             ok = ok && gr.read(n_dims);
             if (n_dims > GGML_MAX_DIMS) {
@@ -510,6 +563,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
                 ok = false;
                 break;
             }
+            // 读取每个维度大小
             for (uint32_t j = 0; ok && j < GGML_MAX_DIMS; ++j) {
                 info.t.ne[j] = 1;
                 if (j < n_dims) {
@@ -525,6 +579,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
                 }
             }
 
+            // 整数溢出检查
             // check that the total number of elements is representable
             if (ok && ((INT64_MAX/info.t.ne[1] <= info.t.ne[0]) ||
                        (INT64_MAX/info.t.ne[2] <= info.t.ne[0]*info.t.ne[1]) ||
@@ -541,10 +596,12 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             break;
         }
 
+        // 读取张量类型
         // tensor type
         {
             ok = ok && gr.read(info.t.type);
 
+            // 确保张量类型在定义范围内
             // check that tensor type is within defined range
             if (info.t.type < 0 || info.t.type >= GGML_TYPE_COUNT) {
                 fprintf(stderr, "%s: tensor '%s' has invalid ggml type %d (%s)\n",
@@ -555,6 +612,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             const size_t  type_size = ggml_type_size(info.t.type);
             const int64_t blck_size = ggml_blck_size(info.t.type);
 
+            // 验证行大小与块大小的兼容性
             // check that row size is divisible by block size
             if (blck_size == 0 || info.t.ne[0] % blck_size != 0) {
                 fprintf(stderr, "%s: tensor '%s' of type %d (%s) has %" PRId64 " elements per row, "
@@ -564,7 +622,15 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
                 break;
             }
 
+            // 计算内存布局
             // calculate byte offsets given the tensor shape and type
+            // 举例：对于一个形状为[4,3,2]的float (FP32)类型张量:
+            // ne = [4, 3, 2, 1]       // 4列, 3行, 2个矩阵
+            // type_size = 4，blck_size = 1 （没有量化）
+            // nb[0] = 4               // 相邻元素间隔4字节
+            // nb[1] = 4 * (4/1) = 16  // 相邻行间隔16字节
+            // nb[2] = 16 * 3 = 48     // 相邻矩阵间隔48字节
+            // nb[3] = 48 * 2 = 96     // 第四维(不使用)
             info.t.nb[0] = type_size;
             info.t.nb[1] = info.t.nb[0]*(info.t.ne[0]/blck_size);
             for (int j = 2; j < GGML_MAX_DIMS; ++j) {
@@ -575,9 +641,11 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             break;
         }
 
+        // 读取张量数据偏移量
         // tensor data offset within buffer
         ok = ok && gr.read(info.offset);
 
+        // 保存到 ctx 中
         ctx->info.push_back(info);
     }
 
@@ -586,9 +654,11 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
         gguf_free(ctx);
         return nullptr;
     }
+    // 确保读取到的张量数量和预期数量一致
     GGML_ASSERT(int64_t(ctx->info.size()) == n_tensors);
 
     // we require the data section to be aligned, so take into account any padding
+    // 确保数据部分正确对齐
     if (fseek(file, GGML_PAD(ftell(file), ctx->alignment), SEEK_SET) != 0) {
         fprintf(stderr, "%s: failed to seek to beginning of data section\n", __func__);
         gguf_free(ctx);
@@ -596,11 +666,13 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
     }
 
     // store the current file offset - this is where the data section starts
+    // 存储数据部分起始位置
     ctx->offset = ftell(file);
 
     // compute the total size of the data section, taking into account the alignment
     {
         ctx->size = 0;
+        // 验证每个张量的偏移是否符合预期
         for (size_t i = 0; i < ctx->info.size(); ++i) {
             const gguf_tensor_info & ti = ctx->info[i];
             if (ti.offset != ctx->size) {
@@ -621,6 +693,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
         //   the ggml_tensor structs to the appropriate locations in the binary blob
 
         // compute the exact size needed for the new ggml_context
+        // 计算需要的内存大小，no_alloc 模式下只需要张量结构体的开销
         const size_t mem_size =
             params.no_alloc ?
             (n_tensors    )*ggml_tensor_overhead() :
@@ -632,6 +705,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             /*no_alloc   =*/ params.no_alloc,
         };
 
+        // 初始化GGML计算上下文，用于存储和操作张量
         *params.ctx = ggml_init(pdata);
         if (*params.ctx == nullptr) {
             fprintf(stderr, "%s: failed to initialize ggml context for storing tensors\n", __func__);
@@ -643,7 +717,9 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
 
         struct ggml_tensor * data = nullptr;
 
+        // 如果是非no_alloc模式，则读取二进制数据块
         if (!params.no_alloc) {
+            // 创建一个大的1D张量来存储所有数据
             data = ggml_new_tensor_1d(ctx_data, GGML_TYPE_I8, ctx->size);
 
             ok = ok && data != nullptr;
@@ -652,6 +728,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
                 ggml_set_name(data, "GGUF tensor data binary blob");
             }
 
+            // 从文件读取整个数据块
             // read the binary blob with the tensor data
             ok = ok && gr.read(data->data, ctx->size);
 
@@ -668,10 +745,12 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
 
         ggml_set_no_alloc(ctx_data, true);
 
+        // 创建各个张量
         // create the tensors
         for (size_t i = 0; i < ctx->info.size(); ++i) {
             const struct gguf_tensor_info & info = ctx->info[i];
 
+            // 创建张量结构，保存到之前分配的 *params.ctx 中
             struct ggml_tensor * cur = ggml_new_tensor(ctx_data, info.t.type, GGML_MAX_DIMS, info.t.ne);
 
             ok = ok && cur != nullptr;
@@ -680,6 +759,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
                 break;
             }
 
+            // 设置张量名称
             ggml_set_name(cur, info.t.name);
 
             // point the data member to the appropriate location in the binary blob using the tensor info
@@ -703,6 +783,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
 }
 
 struct gguf_context * gguf_init_from_file(const char * fname, struct gguf_init_params params) {
+    // 打开文件，在linux上就是 fopen
     FILE * file = ggml_fopen(fname, "rb");
 
     if (!file) {
@@ -743,6 +824,7 @@ int64_t gguf_get_n_kv(const struct gguf_context * ctx) {
     return ctx->kv.size();
 }
 
+// 寻找某个键值对的数组下标
 int64_t gguf_find_key(const struct gguf_context * ctx, const char * key) {
     // return -1 if key not found
     int64_t keyfound = -1;

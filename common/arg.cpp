@@ -1773,6 +1773,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 "or `--model-url` if set, otherwise %s)", DEFAULT_MODEL_PATH
             ),
         [](common_params & params, const std::string & value) {
+            // 保存模型路径
             params.model = value;
         }
     ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_EXPORT_LORA}).set_env("LLAMA_ARG_MODEL"));

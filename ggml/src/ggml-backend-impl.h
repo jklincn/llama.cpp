@@ -178,6 +178,7 @@ extern "C" {
         void                 (*event_synchronize) (ggml_backend_dev_t dev, ggml_backend_event_t event);
     };
 
+    // 后端设备类型
     struct ggml_backend_device {
         struct ggml_backend_device_i iface;
         ggml_backend_reg_t reg;
@@ -188,6 +189,8 @@ extern "C" {
     // Backend (reg)
     //
 
+    // 后端reg统一接口，interface
+    // 包括名称，设备数量，设备指针等
     struct ggml_backend_reg_i {
         const char * (*get_name)(ggml_backend_reg_t reg);
 

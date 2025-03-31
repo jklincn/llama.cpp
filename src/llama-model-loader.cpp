@@ -440,17 +440,21 @@ namespace GGUFMeta {
     template bool llama_model_loader::get_key_or_arr<std::array<int, 4>>(enum llm_kv kid, std::array<int, 4> & result, uint32_t n, bool required);
     template bool llama_model_loader::get_key_or_arr<std::array<uint32_t, 512>>(enum llm_kv kid, std::array<uint32_t, 512> & result, uint32_t n, bool required);
 
+// 模型加载器构造函数
 llama_model_loader::llama_model_loader(
         const std::string & fname,
         std::vector<std::string> & splits,
         bool use_mmap,
         bool check_tensors,
         const struct llama_model_kv_override * param_overrides_p) {
+
+    // 环境变量检查（用于调试和跟踪）
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
         trace = atoi(getenv("LLAMA_TRACE"));
     }
 
+    // 处理 KV 参数覆盖
     if (param_overrides_p != nullptr) {
         for (const struct llama_model_kv_override * p = param_overrides_p; p->key[0] != 0; p++) {
             kv_overrides.insert({std::string(p->key), *p});
@@ -458,26 +462,34 @@ llama_model_loader::llama_model_loader(
     }
 
     // Load the main GGUF
+    // 创建不分配内存的GGML上下文
     struct ggml_context * ctx = NULL;
     struct gguf_init_params params = {
         /*.no_alloc = */ true,
         /*.ctx      = */ &ctx,
     };
 
+    // 加载主 GGUF 文件
+    // 使用智能指针管理GGUF上下文生命周期
     meta.reset(gguf_init_from_file(fname.c_str(), params));
     if (!meta) {
         throw std::runtime_error(format("%s: failed to load model from %s\n", __func__, fname.c_str()));
     }
 
+    // 读取模型架构名称
     get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
+    // 将字符串架构名转换为枚举值
     llm_kv = LLM_KV(llm_arch_from_string(arch_name));
 
+    // 打开模型文件并保存文件句柄
     files.emplace_back(new llama_file(fname.c_str(), "rb"));
+    // 保存GGML上下文指针
     contexts.emplace_back(ctx);
 
     // Save tensors data offset of the main file.
     // For subsidiary files, `meta` tensor data offset must not be used,
     // so we build a unified tensors index for weights.
+    // 遍历所有张量，构建名称到权重信息的映射，主要是处理当有多个权重文件的情况
     for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
         std::string tensor_name = std::string(cur->name);
         // make sure there is no duplicated tensor names
@@ -488,6 +500,8 @@ llama_model_loader::llama_model_loader(
         n_bytes    += ggml_nbytes(cur);
         weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, meta.get(), cur));
     }
+
+    // 处理模型分片
     uint16_t n_split = 0;
     get_key(llm_kv(LLM_KV_SPLIT_COUNT), n_split, false);
 
@@ -569,9 +583,11 @@ llama_model_loader::llama_model_loader(
         LLAMA_LOG_INFO("%s: additional %d GGUFs metadata loaded.\n",  __func__, n_split - 1);
     }
 
+    // 查询元数据键值对
     n_kv      = gguf_get_n_kv(meta.get());
     n_tensors = weights_map.size();
 
+    // 确定文件版本
     fver = (enum llama_fver) gguf_get_version(meta.get());
 
     LLAMA_LOG_INFO("%s: loaded meta data with %d key-value pairs and %d tensors from %s (version %s)\n",
@@ -585,6 +601,7 @@ llama_model_loader::llama_model_loader(
         uint32_t n_type_max = 0;
         enum ggml_type type_max = GGML_TYPE_F32;
 
+        // 统计每种张量类型的数量
         for (const auto & it : weights_map) {
             const llama_tensor_weight & w = it.second;
             const ggml_tensor * tensor = w.tensor;
@@ -593,6 +610,7 @@ llama_model_loader::llama_model_loader(
 
             n_type[type]++;
 
+            // 确定一个类型的最大数量
             if (n_type_max < n_type[type]) {
                 n_type_max = n_type[type];
                 type_max   = type;
@@ -604,6 +622,7 @@ llama_model_loader::llama_model_loader(
             }
         }
 
+        // 根据最大数量的类型确定文件类型
         switch (type_max) {
             case GGML_TYPE_F32:     ftype = LLAMA_FTYPE_ALL_F32;        break;
             case GGML_TYPE_F16:     ftype = LLAMA_FTYPE_MOSTLY_F16;     break;
@@ -648,6 +667,7 @@ llama_model_loader::llama_model_loader(
 
         LLAMA_LOG_INFO("%s: Dumping metadata keys/values. Note: KV overrides do not apply in this output.\n", __func__);
 
+        // 提取和打印元数据
         for (int i = 0; i < n_kv; i++) {
             const char * name           = gguf_get_key(meta.get(), i);
             const enum gguf_type type   = gguf_get_kv_type(meta.get(), i);

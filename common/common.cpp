@@ -921,6 +921,7 @@ struct common_init_result common_init_from_params(common_params & params) {
         return iparams;
     }
 
+    // 获得词汇表
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
     if (params.reranking) {

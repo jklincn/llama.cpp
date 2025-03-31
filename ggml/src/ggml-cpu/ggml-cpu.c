@@ -2446,6 +2446,7 @@ struct ggml_state {
     struct ggml_numa_nodes numa;
 };
 
+// 全局状态，看来目前只存储了 numa 相关的信息
 static struct ggml_state g_state = {0};
 
 void ggml_barrier(struct ggml_threadpool * tp) {
@@ -2501,7 +2502,9 @@ static uint32_t ggml_get_numa_affinity(void) {
 }
 #endif
 
+// 主要是根据 sys 文件系统设置当前系统的 numa 信息，保存到全局变量中
 void ggml_numa_init(enum ggml_numa_strategy numa_flag) {
+    // 根据 numa.n_nodes 判断是否已初始化
     if (g_state.numa.n_nodes > 0) {
         fprintf(stderr, "ggml_numa_init: NUMA already initialized\n");
 
@@ -2518,17 +2521,23 @@ void ggml_numa_init(enum ggml_numa_strategy numa_flag) {
 
     GGML_PRINT_DEBUG("numa strategy %u\n",g_state.numa.numa_strategy);
 
+    // 获取当前线程的 CPU 亲和性
     g_state.numa.cpuset = ggml_get_numa_affinity();
 
     // enumerate nodes
     while (g_state.numa.n_nodes < GGML_NUMA_MAX_NODES) {
+        // 构造文件路径字符串，存储到 path 中，rv 是返回的写入字符数（不包含 \0）
         rv = snprintf(path, sizeof(path), "/sys/devices/system/node/node%u", g_state.numa.n_nodes);
+        // 检查字符串是否完全写入 path，即路径是否合法
         GGML_ASSERT(rv > 0 && (unsigned)rv < sizeof(path));
+        // 查找是否存在 numa 节点
         if (stat(path, &st) != 0) { break; }
+        // 存在则增加计数
         ++g_state.numa.n_nodes;
     }
 
     // enumerate CPUs
+    // 同上，统计 CPU 数量
     while (g_state.numa.total_cpus < GGML_NUMA_MAX_CPUS) {
         rv = snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%u", g_state.numa.total_cpus);
         GGML_ASSERT(rv > 0 && (unsigned)rv < sizeof(path));
@@ -2539,6 +2548,7 @@ void ggml_numa_init(enum ggml_numa_strategy numa_flag) {
     GGML_PRINT_DEBUG("found %u numa nodes, %u CPUs\n", g_state.numa.n_nodes, g_state.numa.total_cpus);
 
     // figure out which node we're on
+    // 确定当前 CPU
     uint current_cpu;
     int getcpu_ret = 0;
 #if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ > 33) || defined(__COSMOPOLITAN__)
@@ -2558,11 +2568,15 @@ void ggml_numa_init(enum ggml_numa_strategy numa_flag) {
 
     GGML_PRINT_DEBUG("found our process on numa node %u, CPU %u\n", g_state.numa.current_node, current_cpu);
 
+    // 遍历所有 numa 节点，建立 NUMA 结构
     for (uint32_t n = 0; n < g_state.numa.n_nodes; ++n) {
+        // 获取 numa 节点指针
         struct ggml_numa_node * node = &g_state.numa.nodes[n];
         GGML_PRINT_DEBUG("CPUs on node %u:", n);
         node->n_cpus = 0;
+        // 遍历所有的 CPU，找到其归属的 node 节点
         for (uint32_t c = 0; c < g_state.numa.total_cpus; ++c) {
+            // 和上面一样根据 /sys 文件系统判断
             rv = snprintf(path, sizeof(path), "/sys/devices/system/node/node%u/cpu%u", n, c);
             GGML_ASSERT(rv > 0 && (unsigned)rv < sizeof(path));
             if (stat(path, &st) == 0) {
@@ -2573,6 +2587,7 @@ void ggml_numa_init(enum ggml_numa_strategy numa_flag) {
         GGML_PRINT_DEBUG("\n");
     }
 
+    // 检查 NUMA 自动平衡
     if (ggml_is_numa()) {
         FILE *fptr = fopen("/proc/sys/kernel/numa_balancing", "r");
         if (fptr != NULL) {
@@ -15726,8 +15741,11 @@ int ggml_cpu_has_sme(void) {
 void ggml_cpu_init(void) {
     // needed to initialize f16 tables
     {
+        // mem_size, mem_buffer, no_alloc
         struct ggml_init_params params = { 0, NULL, false };
+        // 获得一个 context，这里并不是第一次调用 ggml_init，所以 F16 tables 已经计算过
         struct ggml_context * ctx = ggml_init(params);
+        // 为什么要 free?
         ggml_free(ctx);
     }
 
@@ -15737,6 +15755,7 @@ void ggml_cpu_init(void) {
 
     if (is_first_call) {
         // initialize GELU, Quick GELU, SILU and EXP F32 tables
+        // 预计算，只计算一次
         {
             const uint64_t t_start = ggml_time_us(); UNUSED(t_start);
 

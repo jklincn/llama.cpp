@@ -1,8 +1,8 @@
 #pragma once
 
-#include "ggml.h" // ggml_op
-
 #include <string>
+
+#include "ggml.h"  // ggml_op
 
 //
 // gguf constants (sync with gguf.py)
@@ -232,7 +232,7 @@ enum llm_tensor {
     LLM_TENSOR_FFN_GATE_EXP,
     LLM_TENSOR_FFN_UP_EXP,
     LLM_TENSOR_FFN_NORM_EXPS,
-    LLM_TENSOR_FFN_DOWN_EXPS, // merged experts
+    LLM_TENSOR_FFN_DOWN_EXPS,  // merged experts
     LLM_TENSOR_FFN_GATE_EXPS,
     LLM_TENSOR_FFN_UP_EXPS,
     LLM_TENSOR_FFN_DOWN_SHEXP,
@@ -338,7 +338,7 @@ enum llm_tensor_layer {
 struct LLM_KV {
     LLM_KV(llm_arch arch, const char * suffix = nullptr);
 
-    llm_arch arch;
+    llm_arch     arch;
     const char * suffix;
 
     std::string operator()(llm_kv kv) const;
@@ -354,25 +354,19 @@ struct LLM_KV {
 //   std::string name = tn(LLM_TENSOR_ATTN_NORM, "weight", 3);     -> "blk.3.attn_norm.weight"
 //
 struct LLM_TN_IMPL {
-    const llm_arch arch;
-    const llm_tensor tensor;
+    const llm_arch     arch;
+    const llm_tensor   tensor;
     const char * const suffix;
-    const int bid;
-    const int xid;
+    const int          bid;
+    const int          xid;
 
     std::string str() const;
 
-    operator std::string() const {
-        return str();
-    }
+    operator std::string() const { return str(); }
 
-    friend bool operator==(const std::string & str, const LLM_TN_IMPL & tn) {
-        return str == tn.str();
-    }
+    friend bool operator==(const std::string & str, const LLM_TN_IMPL & tn) { return str == tn.str(); }
 
-    friend bool operator!=(const std::string & str, const LLM_TN_IMPL & tn) {
-        return str != tn.str();
-    }
+    friend bool operator!=(const std::string & str, const LLM_TN_IMPL & tn) { return str != tn.str(); }
 };
 
 struct LLM_TN {
@@ -389,10 +383,9 @@ struct LLM_TN {
     }
 };
 
-
 struct llm_tensor_info {
     llm_tensor_layer layer;
-    ggml_op op;
+    ggml_op          op;
 };
 
 const char * llm_arch_name(llm_arch arch);

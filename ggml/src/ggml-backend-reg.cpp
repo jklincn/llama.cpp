@@ -211,7 +211,9 @@ struct ggml_backend_registry {
         GGML_LOG_DEBUG("%s: registered backend %s (%zu devices)\n",
             __func__, ggml_backend_reg_name(reg), ggml_backend_reg_dev_count(reg));
 #endif
+        // 组成 ggml_backend_reg_entry 结构体保存到 backends 列表中
         backends.push_back({ reg, std::move(handle) });
+        // 遍历当前后端的所有设备进行注册
         for (size_t i = 0; i < ggml_backend_reg_dev_count(reg); i++) {
             register_device(ggml_backend_reg_dev_get(reg, i));
         }
@@ -221,9 +223,11 @@ struct ggml_backend_registry {
 #ifndef NDEBUG
         GGML_LOG_DEBUG("%s: registered device %s (%s)\n", __func__, ggml_backend_dev_name(device), ggml_backend_dev_description(device));
 #endif
+        // 加入到设备列表中
         devices.push_back(device);
     }
 
+    // 从 DDL 加载后端，好像和 GGML_BACKEND_DL 相关
     ggml_backend_reg_t load_backend(const fs::path & path, bool silent) {
         dl_handle_ptr handle { dl_load_library(path) };
         if (!handle) {
@@ -296,6 +300,7 @@ struct ggml_backend_registry {
     }
 };
 
+// 第一次调用时注册后端仓库，算是一个全局变量
 static ggml_backend_registry & get_reg() {
     static ggml_backend_registry reg;
     return reg;
@@ -340,6 +345,7 @@ ggml_backend_reg_t ggml_backend_reg_by_name(const char * name) {
 }
 
 // Device enumeration
+// 返回 device 向量的长度
 size_t ggml_backend_dev_count() {
     return get_reg().devices.size();
 }
@@ -359,9 +365,12 @@ ggml_backend_dev_t ggml_backend_dev_by_name(const char * name) {
     return nullptr;
 }
 
+// 根据 type 获得 device 结构体
 ggml_backend_dev_t ggml_backend_dev_by_type(enum ggml_backend_dev_type type) {
+    // 遍历所有的后端 device
     for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        // 类型一致则返回 device 指针
         if (ggml_backend_dev_type(dev) == type) {
             return dev;
         }
@@ -555,6 +564,7 @@ static ggml_backend_reg_t ggml_backend_load_best(const char * name, bool silent,
         }
         return nullptr;
     }
+    GGML_LOG_INFO("load backend %s from %s\n", name, best_path.c_str());
 
     return get_reg().load_backend(best_path, silent);
 }

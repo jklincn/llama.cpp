@@ -1406,6 +1406,7 @@ static inline bool ggml_can_repeat_rows(const struct ggml_tensor * t0, const str
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// 初始化一个 ggml_context 结构体
 struct ggml_context * ggml_init(struct ggml_init_params params) {
     static bool is_first_call = true;
 
@@ -1572,15 +1573,18 @@ static struct ggml_tensor * ggml_new_tensor_impl(
         struct ggml_tensor  * view_src,
         size_t                view_offs) {
 
+    // 进行安全检查
     GGML_ASSERT(type >= 0 && type < GGML_TYPE_COUNT);
     GGML_ASSERT(n_dims >= 1 && n_dims <= GGML_MAX_DIMS);
 
     // find the base tensor and absolute offset
+    // 处理嵌套视图 - 找到最终的基础张量
     if (view_src != NULL && view_src->view_src != NULL) {
         view_offs += view_src->view_offs;
         view_src   = view_src->view_src;
     }
 
+    // 计算张量所需的总字节数
     size_t data_size = ggml_row_size(type, ne[0]);
     for (int i = 1; i < n_dims; i++) {
         data_size *= ne[i];
@@ -1588,6 +1592,7 @@ static struct ggml_tensor * ggml_new_tensor_impl(
 
     GGML_ASSERT(view_src == NULL || data_size == 0 || data_size + view_offs <= ggml_nbytes(view_src));
 
+    // 如果是视图模式，设置数据指针指向源张量的适当位置
     void * data = view_src != NULL ? view_src->data : NULL;
     if (data != NULL) {
         data = (char *) data + view_offs;
@@ -1595,14 +1600,17 @@ static struct ggml_tensor * ggml_new_tensor_impl(
 
     size_t obj_alloc_size = 0;
 
+    // 如果是普通张量(非视图)且上下文允许分配，则计算需要的内存大小
     if (view_src == NULL && !ctx->no_alloc) {
         // allocate tensor data in the context's memory pool
         obj_alloc_size = data_size;
     }
 
+    // 在上下文内存池中分配张量对象
     struct ggml_object * const obj_new = ggml_new_object(ctx, GGML_OBJECT_TYPE_TENSOR, GGML_TENSOR_SIZE + obj_alloc_size);
     GGML_ASSERT(obj_new);
 
+    // 初始化张量结构体
     struct ggml_tensor * const result = (struct ggml_tensor *)((char *)ctx->mem_buffer + obj_new->offs);
 
     *result = (struct ggml_tensor) {
@@ -1625,10 +1633,12 @@ static struct ggml_tensor * ggml_new_tensor_impl(
     // TODO: this should not be needed as long as we don't rely on aligned SIMD loads
     //GGML_ASSERT_ALIGNED(result->data);
 
+    // 设置各维度大小
     for (int i = 0; i < n_dims; i++) {
         result->ne[i] = ne[i];
     }
 
+    // 计算步长(stride)
     result->nb[0] = ggml_type_size(type);
     result->nb[1] = result->nb[0]*(result->ne[0]/ggml_blck_size(type));
     for (int i = 2; i < GGML_MAX_DIMS; i++) {

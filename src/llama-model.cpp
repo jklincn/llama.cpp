@@ -3789,6 +3789,7 @@ const struct ggml_tensor * llama_model::get_tensor(const char * name) const {
 // interface implementation
 //
 
+// 默认参数
 struct llama_model_params llama_model_default_params() {
     struct llama_model_params result = {
         /*.devices                     =*/ nullptr,

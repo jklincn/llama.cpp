@@ -31,9 +31,11 @@
 #endif
 
 // Returns 0 on success, -1 on error, and -2 on cancellation via llama_progress_callback
+// 加载模型
 static int llama_model_load(const std::string & fname, std::vector<std::string> & splits, llama_model & model, llama_model_params & params) {
     // loading time will be recalculated after the first eval, so
     // we take page faults deferred by mmap() into consideration
+    // 计算模型加载的时间
     model.t_load_us = 0;
     time_meas tm(model.t_load_us);
 
@@ -9409,9 +9411,12 @@ void llama_backend_init(void) {
 
 void llama_numa_init(enum ggml_numa_strategy numa) {
     if (numa != GGML_NUMA_STRATEGY_DISABLED) {
+        // 根据 type 获取 CPU device 结构体
         auto * dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
         GGML_ASSERT(dev && "CPU backend is not loaded");
+        // 根据 device 获取 CPU reg 结构体
         auto * reg = ggml_backend_dev_backend_reg(dev);
+        // 从 reg 的 iface 中(ggml_backend_cpu_get_proc_address)获取 ggml_backend_cpu_numa_init 函数指针
         auto * numa_init_fn = (decltype(ggml_numa_init) *) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cpu_numa_init");
         numa_init_fn(numa);
     }
@@ -9435,7 +9440,7 @@ static struct llama_model * llama_model_load_from_file_impl(
 
     // 进度回调
     unsigned cur_percentage = 0;
-    // 用户无定义则使用默认回调
+    // 用户无定义则使用默认回调（打印进度条）
     if (params.progress_callback == NULL) {
         params.progress_callback_user_data = &cur_percentage;
         params.progress_callback = [](float progress, void * ctx) {
@@ -9452,7 +9457,7 @@ static struct llama_model * llama_model_load_from_file_impl(
         };
     }
 
-    // 创建 llama_model 实例，并传入 params 进行初始化。
+    // 创建 llama_model 实例，并传入 params（实际是 mparams） 进行初始化。
     llama_model * model = new llama_model(params);
 
     // 选择合适的计算设备
@@ -9465,7 +9470,7 @@ static struct llama_model * llama_model_load_from_file_impl(
         // 自动选择可用设备
         std::vector<ggml_backend_dev_t> rpc_servers;
         // use all available devices
-        // 遍历所有设备
+        // 遍历所有初始化时找到的设备
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             ggml_backend_dev_t dev = ggml_backend_dev_get(i);
             switch (ggml_backend_dev_type(dev)) {
@@ -9492,7 +9497,7 @@ static struct llama_model * llama_model_load_from_file_impl(
     }
 
     // if using single GPU mode, remove all except the main GPU
-    // 单GPU模型，设置主GPU，删去其他
+    // 如果是单GPU模式，设置主GPU，删去其他
     if (params.split_mode == LLAMA_SPLIT_MODE_NONE) {
         if (params.main_gpu < 0 || params.main_gpu >= (int)model->devices.size()) {
             LLAMA_LOG_ERROR("%s: invalid value for main_gpu: %d (available devices: %d)\n", __func__, params.main_gpu, (int)model->devices.size());
@@ -9505,6 +9510,7 @@ static struct llama_model * llama_model_load_from_file_impl(
     }
 
     // 遍历所有设备，打印设备名称、描述和可用内存（MiB）
+    // 看起来不用 GPU 的话，只用CPU是看不到这个的，因为CPU分开处理了
     for (auto * dev : model->devices) {
         size_t free, total; // NOLINT
         ggml_backend_dev_memory(dev, &free, &total);
@@ -9539,7 +9545,7 @@ struct llama_model * llama_load_model_from_file(
 struct llama_model * llama_model_load_from_file(
         const char * path_model,
         struct llama_model_params params) {
-    // splits 是多个gguf文件，此处是加载一个
+    // splits 是用于加载多个gguf文件，此处是加载一个
     std::vector<std::string> splits = {};
     return llama_model_load_from_file_impl(path_model, splits, params);
 }

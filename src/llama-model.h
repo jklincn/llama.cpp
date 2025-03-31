@@ -318,12 +318,14 @@ struct llama_model {
 
     std::vector<llama_layer> layers;
 
+    // 模型参数
     llama_model_params params;
 
     // gguf metadata
     std::unordered_map<std::string, std::string> gguf_kv;
 
     // list of devices used in this model
+    // 设备
     std::vector<ggml_backend_dev_t> devices;
 
     // for quantize-stats only

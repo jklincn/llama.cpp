@@ -22,6 +22,12 @@ extern "C" {
     };
 
     // numa strategies
+    // NUMA 策略
+    // - DISABLED：不启用；
+    // - DISTRIBUTE：分布式调度，线程会均匀地分布在所有 NUMA 节点上的核心。可以利用整个系统的所有计算资源，
+    // 并最大化所有内存通道的带宽。但是，这可能会导致线程访问远程 NUMA 节点的内存，从而引入额外的延迟
+    // （因为数据需要跨 NUMA 节点传输）。
+    // - ISOLATE：
     enum ggml_numa_strategy {
         GGML_NUMA_STRATEGY_DISABLED   = 0,
         GGML_NUMA_STRATEGY_DISTRIBUTE = 1,

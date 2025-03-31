@@ -85,14 +85,14 @@ static void sigint_handler(int signo) {
 #endif
 
 int main(int argc, char ** argv) {
-    // 解析命令行参数
+    // 解析命令行参数，这里会进行 ggml backend 的初始化
     common_params params;
     g_params = &params;
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_MAIN, print_usage)) {
         return 1;
     }
 
-    // 初始化，看起来只有日志初始化
+    // 初始化，看起来只有日志初始化，输出构建信息
     common_init();
 
     // 采样参数
@@ -134,7 +134,7 @@ int main(int argc, char ** argv) {
 
     LOG_INF("%s: llama backend init\n", __func__);
 
-    // 后端初始化
+    // 后端初始化，又把FP16计算了一次，感觉 llama.cpp 的后端和 ggml 的后端目前比较杂糅，没有处理好
     llama_backend_init();
     // numa 初始化
     llama_numa_init(params.numa);
@@ -143,6 +143,7 @@ int main(int argc, char ** argv) {
     llama_context * ctx = nullptr;
     common_sampler * smpl = nullptr;
 
+    // 一些全局变量
     g_model = &model;
     g_ctx = &ctx;
     g_smpl = &smpl;
@@ -152,7 +153,7 @@ int main(int argc, char ** argv) {
     // 模型加载
     // load the model and apply lora adapter, if any
     LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
-    // 模型参数
+    // 模型初始化
     common_init_result llama_init = common_init_from_params(params);
 
     model = llama_init.model.get();
