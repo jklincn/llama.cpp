@@ -415,6 +415,7 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
         unsigned number;
         cl_device_type type;
         char name[128];
+        char version[128];
     };
 
     enum { NPLAT = 16, NDEV = 16 };
@@ -455,6 +456,7 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
             d->platform = p;
             CL_CHECK(clGetDeviceInfo(d->id, CL_DEVICE_NAME, sizeof(d->name), &d->name, NULL));
             CL_CHECK(clGetDeviceInfo(d->id, CL_DEVICE_TYPE, sizeof(d->type), &d->type, NULL));
+            CL_CHECK(clGetDeviceInfo(d->id, CL_DEVICE_VERSION, sizeof(d->version), &d->version, NULL));
 
             if (p->default_device == NULL && d->type == CL_DEVICE_TYPE_GPU) {
                 p->default_device = d;
@@ -547,7 +549,7 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     }
 
     GGML_LOG_INFO("ggml_opencl: selecting platform: '%s'\n", default_device->platform->name);
-    GGML_LOG_INFO("ggml_opencl: selecting device: '%s'\n", default_device->name);
+    GGML_LOG_INFO("ggml_opencl: selecting device: '%s (%s)'\n", default_device->name, default_device->version);
     if (default_device->type != CL_DEVICE_TYPE_GPU) {
         GGML_LOG_WARN("ggml_opencl: warning, not a GPU: '%s'.\n", default_device->name);
     }
@@ -556,9 +558,15 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     dev_ctx->device = default_device->id;
     backend_ctx->device = default_device->id;
 
-    if (strstr(default_device->name, "Adreno")) {
+    if (strstr(default_device->name, "Adreno") ||
+        strstr(default_device->name, "Qualcomm") ||
+        strstr(default_device->version, "Adreno")) {
         backend_ctx->gpu_family = GPU_FAMILY::ADRENO;
-        backend_ctx->adreno_gen = get_adreno_gpu_gen(default_device->name);
+        // Usually device version contains the detailed device name
+        backend_ctx->adreno_gen = get_adreno_gpu_gen(default_device->version);
+        if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::ADRENO_UNKNOWN) {
+            backend_ctx->adreno_gen = get_adreno_gpu_gen(default_device->name);
+        }
 
         // Use wave size of 64 for all Adreno GPUs.
         backend_ctx->adreno_wave_size = 64;
@@ -921,10 +929,30 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     backend_ctx->program_CL_gemm = build_program_from_source(context, device, kernel_src_CL_gemm.c_str(), compile_opts);
     CL_CHECK((backend_ctx->CL_mul_mat_Ab_Bi_8x4 = clCreateKernel(backend_ctx->program_CL_gemm, "kernel_mul_mat_Ab_Bi_8x4", &err), err));
 
+    // TODO: fixme: these sizes are hardcoded for now.
+    //  they should be allocated based on the model's size
+    //  and the device's max alloc size
     // Allocate intermediate buffers and images
-    size_t max_A_q_d_bytes = 311164928;
-    size_t max_A_s_d_bytes = 38895616;
-    size_t max_B_d_bytes = 45088768;
+    size_t required_A_q_d_bytes = 311164928;
+    size_t required_A_s_d_bytes = 38895616;
+    size_t required_B_d_bytes = 45088768;
+
+    // Ensure buffer sizes do not exceed the maximum allocation size
+    size_t max_A_q_d_bytes = MIN(required_A_q_d_bytes, backend_ctx->max_alloc_size);
+    size_t max_A_s_d_bytes = MIN(required_A_s_d_bytes, backend_ctx->max_alloc_size);
+    size_t max_B_d_bytes   = MIN(required_B_d_bytes, backend_ctx->max_alloc_size);
+    if (required_A_q_d_bytes > backend_ctx->max_alloc_size) {
+        GGML_LOG_WARN("ggml_opencl: A_q_d buffer size reduced from %zu to %zu due to device limitations.\n",
+                      required_A_q_d_bytes, max_A_q_d_bytes);
+    }
+    if (required_A_s_d_bytes > backend_ctx->max_alloc_size) {
+        GGML_LOG_WARN("ggml_opencl: A_s_d buffer size reduced from %zu to %zu due to device limitations.\n",
+                      required_A_s_d_bytes, max_A_s_d_bytes);
+    }
+    if (required_B_d_bytes > backend_ctx->max_alloc_size) {
+        GGML_LOG_WARN("ggml_opencl: B_d buffer size reduced from %zu to %zu due to device limitations.\n",
+                      required_B_d_bytes, max_B_d_bytes);
+    }
 
     CL_CHECK((backend_ctx->A_q_d_max = clCreateBuffer(context, 0, max_A_q_d_bytes, NULL, &err), err));
     CL_CHECK((backend_ctx->A_s_d_max = clCreateBuffer(context, 0, max_A_s_d_bytes, NULL, &err), err));
