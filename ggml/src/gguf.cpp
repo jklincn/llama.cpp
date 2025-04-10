@@ -328,9 +328,6 @@ bool gguf_read_emplace_helper(const struct gguf_reader & gr, std::vector<struct 
 
 struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_params params) {
     // 创建文件读取器和GGUF上下文，并设置状态标志。
-    fprintf(stderr, "DEBUG: params.ctx = %p, *params.ctx = %p\n", 
-        (void*)params.ctx, (void*)(params.ctx ? *params.ctx : NULL));
-
     const struct gguf_reader gr(file);
     struct gguf_context * ctx = new gguf_context;
 

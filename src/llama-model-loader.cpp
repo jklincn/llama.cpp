@@ -655,7 +655,7 @@ llama_model_loader::llama_model_loader(
                 } break;
         }
 
-        // this is a way to mark that we have "guessed" the file type
+        // 标记为猜测
         ftype = (llama_ftype) (ftype | LLAMA_FTYPE_GUESSED);
 
         {
@@ -667,7 +667,7 @@ llama_model_loader::llama_model_loader(
 
         LLAMA_LOG_INFO("%s: Dumping metadata keys/values. Note: KV overrides do not apply in this output.\n", __func__);
 
-        // 提取和打印元数据
+        // 打印所有键值对
         for (int i = 0; i < n_kv; i++) {
             const char * name           = gguf_get_key(meta.get(), i);
             const enum gguf_type type   = gguf_get_kv_type(meta.get(), i);
@@ -686,7 +686,7 @@ llama_model_loader::llama_model_loader(
             LLAMA_LOG_INFO("%s: - kv %3d: %42s %-16s = %s\n", __func__, i, name, type_name.c_str(), value.c_str());
         }
 
-        // print type counts
+        // 打印类型统计
         for (auto & kv : n_type) {
             if (kv.second == 0) {
                 continue;
@@ -730,6 +730,7 @@ const llama_model_loader::llama_tensor_weight & llama_model_loader::require_weig
     return *weight;
 }
 
+// 根据权重名称获取张量权重
 struct ggml_tensor * llama_model_loader::get_tensor_meta(const char * name) const {
     const auto * weight = get_weight(name);
     if (!weight) {
@@ -758,6 +759,7 @@ const struct ggml_tensor * llama_model_loader::check_tensor_dims(const std::stri
 
     {
         bool is_ok = true;
+        // 检查张量维度信息
         for (size_t i = 0; i < GGML_MAX_DIMS; ++i) {
             if ((i < ne.size() && ne[i] != cur->ne[i]) || (i >= ne.size() && cur->ne[i] != 1)) {
                 is_ok = false;
@@ -783,11 +785,15 @@ struct ggml_tensor * llama_model_loader::create_tensor(struct ggml_context * ctx
         return NULL;
     }
 
+    // 检查是否为重复张量
     bool duplicated = flags & TENSOR_DUPLICATED;
 
+    // 创建张量结构，其中会调用 ggml_new_tensor
     struct ggml_tensor * tensor = ggml_dup_tensor(ctx, cur);
+    // 设置新创建张量的名称
     ggml_set_name(tensor, ggml_get_name(cur));
 
+    // 更新统计信息
     if (duplicated) {
         size_data += ggml_nbytes(cur);
     } else {

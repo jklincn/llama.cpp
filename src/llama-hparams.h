@@ -24,6 +24,7 @@ struct llama_hparams_convnext {
     uint32_t n_layer;
 };
 
+// 模型超参数
 struct llama_hparams {
     bool vocab_only;
     bool rope_finetuned;

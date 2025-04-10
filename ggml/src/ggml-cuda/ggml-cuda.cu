@@ -704,6 +704,7 @@ ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device) {
 
     static bool ggml_backend_cuda_buffer_type_initialized = false;
 
+    // 仅在第一次请求时才初始化，后续则直接返回
     if (!ggml_backend_cuda_buffer_type_initialized) {
         for (int i = 0; i < ggml_backend_cuda_get_device_count(); i++) {
             ggml_backend_cuda_buffer_types[i] = {

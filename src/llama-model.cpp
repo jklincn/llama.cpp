@@ -10,6 +10,7 @@
 #include <cassert>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -222,8 +223,11 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
 
     // create a temporary dummy buffer for the weight so that supports_op can check the buffer type
     GGML_ASSERT(w->buffer == nullptr);
+    // 创建临时缓冲区
     w->buffer = ggml_backend_buft_alloc_buffer(buft, 0);
+    // 检查设备是否支持该操作
     bool op_supported = ggml_backend_dev_supports_op(dev, op_tensor);
+    // 释放临时缓冲区
     ggml_backend_buffer_free(w->buffer);
     w->buffer = nullptr;
 
@@ -236,9 +240,11 @@ using buft_list_t = std::vector<std::pair<ggml_backend_dev_t, ggml_backend_buffe
 // find the first buffer type in the list that can use the tensor
 static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hparams, ggml_tensor * tensor, ggml_op op, const buft_list_t & buft_list) {
     GGML_ASSERT(!buft_list.empty());
+    // 遍历缓冲区类型列表
     for (const auto & cur : buft_list) {
         ggml_backend_dev_t cur_dev = cur.first;
         ggml_backend_buffer_type_t cur_buft = cur.second;
+        // 检查缓冲区类型是否兼容:
         if (weight_buft_supported(hparams, tensor, op, cur_buft, cur_dev)) {
             return cur_buft;
         }
@@ -247,6 +253,7 @@ static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hpara
 }
 
 // CPU: ACCEL -> CPU extra -> GPU host -> CPU
+// 按特定优先级顺序收集不同设备的缓冲区类型
 static buft_list_t make_cpu_buft_list(const std::vector<ggml_backend_dev_t> & devices) {
     buft_list_t buft_list;
 
@@ -263,6 +270,9 @@ static buft_list_t make_cpu_buft_list(const std::vector<ggml_backend_dev_t> & de
     }
 
     // add extra buffer types
+    // 获取 CPU 设备，然后通过动态查找函数指针的方式获取额外的缓冲区类型。
+    // 这种方式允许 CPU 后端提供特殊的、可能优化过的额外缓冲区类型。
+    // 如果找到这些额外类型，就添加到列表中。
     auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
     auto * cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
     auto ggml_backend_dev_get_extra_bufts_fn = (ggml_backend_dev_get_extra_bufts_t)
@@ -281,6 +291,8 @@ static buft_list_t make_cpu_buft_list(const std::vector<ggml_backend_dev_t> & de
     // generally, this will be done using the first device in the list
     // a better approach would be to handle this on a weight-by-weight basis using the offload_op
     // function of the device to determine if it would benefit from being stored in a host buffer
+    // 使用主机缓冲区来优化 CPU 与 GPU 的数据传输
+    // 具体接口是 ggml_backend_cuda_buffer_type_interface
     for (auto * dev : devices) {
         ggml_backend_buffer_type_t buft = ggml_backend_dev_host_buffer_type(dev);
         if (buft) {
@@ -385,10 +397,12 @@ void llama_model::load_arch(llama_model_loader & ml) {
     }
 }
 
+// 加载超参数
 void llama_model::load_hparams(llama_model_loader & ml) {
     const gguf_context * ctx = ml.meta.get();
 
     // get metadata as string
+    // 提取所有键值对（除了array）并存储在 gguf_kv 中
     for (int i = 0; i < gguf_get_n_kv(ctx); i++) {
         enum gguf_type type = gguf_get_kv_type(ctx, i);
         if (type == GGUF_TYPE_ARRAY) {
@@ -400,13 +414,16 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     }
 
     // get general kv
+    // 获取模型名称
     ml.get_key(LLM_KV_GENERAL_NAME, name, false);
 
     // everything past this point is not vocab-related
+    // 如果只需要词汇表信息（hparams.vocab_only 为真），则提前返回
     if (hparams.vocab_only) {
         return;
     }
 
+    // 基本参数加载
     ml.get_key(LLM_KV_CONTEXT_LENGTH,    hparams.n_ctx_train);
     ml.get_key(LLM_KV_EMBEDDING_LENGTH,  hparams.n_embd);
     ml.get_key(LLM_KV_BLOCK_COUNT,       hparams.n_layer);
@@ -423,6 +440,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
         ml.get_key(LLM_KV_CONVNEXT_BLOCK_COUNT,      hparams.convnext.n_layer);
     }
 
+    // 对 MoE 模型中专家参数的一些检查
     GGML_ASSERT(hparams.n_expert <= LLAMA_MAX_EXPERTS);
     GGML_ASSERT(hparams.n_expert_used <= hparams.n_expert);
     if (hparams.n_expert > 0) {
@@ -432,10 +450,12 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     }
 
     // zero-out the array hparams
+    // 用0填充
     std::fill(hparams.n_head_arr.begin(),    hparams.n_head_arr.end(),    0);
     std::fill(hparams.n_head_kv_arr.begin(), hparams.n_head_kv_arr.end(), 0);
     std::fill(hparams.n_ff_arr.begin(),      hparams.n_ff_arr.end(),      0);
 
+    // 加载前馈网络大小、注意力头数量和KV头数量
     ml.get_key_or_arr(LLM_KV_FEED_FORWARD_LENGTH,  hparams.n_ff_arr,   hparams.n_layer, false);
     ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT, hparams.n_head_arr, hparams.n_layer, false);
 
@@ -444,6 +464,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
 
     ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV, hparams.n_head_kv_arr, hparams.n_layer, false);
 
+    // 加载RoPE相关参数
     bool rope_finetuned = false;
     ml.get_key(LLM_KV_ROPE_SCALING_FINETUNED, rope_finetuned, false);
     hparams.rope_finetuned = rope_finetuned;
@@ -471,6 +492,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ROPE_SCALING_ATTN_FACTOR, hparams.rope_attn_factor, false);
 
     // non-transformer models do not have attention heads
+    // 计算注意力头的键和值向量维度
     if (hparams.n_head() > 0) {
         // gpt-neox n_rot = rotary_pct * (n_embd / n_head)
         // gpt-j n_rot = rotary_dim
@@ -502,6 +524,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_VOCAB_SIZE, n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, n_vocab, false);
 
     // arch-specific KVs
+    // 根据具体架构得到一些特定的KV以及根据层数推断模型具体型号
     switch (arch) {
         case LLM_ARCH_LLAMA:
             {
@@ -1266,43 +1289,50 @@ void llama_model::load_vocab(llama_model_loader & ml) {
 }
 
 bool llama_model::load_tensors(llama_model_loader & ml) {
-    const auto & split_mode   = params.split_mode;
-    const auto & n_gpu_layers = params.n_gpu_layers;
-    const auto & use_mlock    = params.use_mlock;
-    const auto & tensor_split = params.tensor_split;
+    const auto & split_mode   = params.split_mode; // 分割模式
+    const auto & n_gpu_layers = params.n_gpu_layers; // 要加载到GPU的层数
+    const auto & use_mlock    = params.use_mlock; // 是否使用内存锁定
+    const auto & tensor_split = params.tensor_split; // 张量在多个设备间的分割比例
 
-    const int n_layer = hparams.n_layer;
+    const int n_layer = hparams.n_layer; // 模型总层数
 
     const bool use_mmap_buffer = true;
 
     LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s)\n", __func__, ml.use_mmap ? "true" : "false");
 
     // build a list of buffer types for the CPU and GPU devices
+    // 为CPU和GPU设备构建缓冲区列表，返回的类型是 ggml_backend_buffer_type_t
+    // 其中有 ggml_backend_buffer_type_i，是一个接口
     pimpl->cpu_buft_list = make_cpu_buft_list(devices);
     for (auto * dev : devices) {
         buft_list_t buft_list = make_gpu_buft_list(dev, split_mode, tensor_split);
         // add CPU buffer types as a fallback
+        // 添加CPU缓冲区类型作为备选
         buft_list.insert(buft_list.end(), pimpl->cpu_buft_list.begin(), pimpl->cpu_buft_list.end());
         pimpl->gpu_buft_list.emplace(dev, std::move(buft_list));
     }
 
     // calculate the split points
+    // 计算设备间的分割点
     bool all_zero = tensor_split == nullptr || std::all_of(tensor_split, tensor_split + n_devices(), [](float x) { return x == 0.0f; });
     std::vector<float> splits(n_devices());
     if (all_zero) {
         // default split, by free memory
+        // 默认按可用内存比例分割
         for (size_t i = 0; i < n_devices(); ++i) {
             ggml_backend_dev_t dev = devices[i];
             size_t total;
             size_t free;
             ggml_backend_dev_memory(dev, &free, &total);
-            splits[i] = free;
+            splits[i] = free; // 按可用内存大小分配
         }
     } else {
+        // 使用用户指定的分割比例
         std::copy(tensor_split, tensor_split + n_devices(), splits.begin());
     }
 
     // sum and normalize the splits to get the split points
+    // 进行归一化
     float split_sum = 0.0f;
     for (size_t i = 0; i < n_devices(); ++i) {
         split_sum += splits[i];
@@ -1313,13 +1343,18 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     }
 
     ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    // 模型中第一个使用 GPU 的层的索引
     const int i_gpu_start = std::max((int) hparams.n_layer - n_gpu_layers, (int) 0);
+    // 实际使用 GPU 的模型层数
     const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, (int)n_layer + 1);
+    // 定义获取层缓冲区列表的lambda函数
     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
         if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
+            // 不在GPU层范围内的分配到CPU
             LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s\n", il, ggml_backend_dev_name(cpu_dev));
             return {cpu_dev, &pimpl->cpu_buft_list};
         }
+        // 计算应该分配到哪个GPU设备
         const int layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(), float(il - i_gpu_start)/act_gpu_layers) - splits.begin();
         auto * dev = devices.at(layer_gpu);
         LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s\n", il, ggml_backend_dev_name(dev));
@@ -1328,24 +1363,30 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
     // assign the input layer
     // there is very little benefit to offloading the input layer, so always keep it on the CPU
+    // 分配输入层（总是保留在CPU上）
     pimpl->dev_input = { cpu_dev, &pimpl->cpu_buft_list };
 
     // assign the repeating layers to the devices according to the splits
+    // 根据分割点分配重复的层到设备
     pimpl->dev_layer.resize(n_layer);
     for (int il = 0; il < n_layer; ++il) {
         pimpl->dev_layer[il] = get_layer_buft_list(il);
     }
 
     // assign the output layer
+    // 分配输出层
     pimpl->dev_output = get_layer_buft_list(n_layer);
 
     // one ggml context per buffer type
     int max_n_tensors = ml.n_tensors;
     max_n_tensors += 1;         // duplicated output tensor
     max_n_tensors += n_layer*2; // duplicated rope freq tensors
+    // 在不分配实际数据内存的前提下，能容纳所有 ggml_tensor 元数据结构的内存大小。
+    // 这里是每个缓冲区都要分配一个 ggml_context
     const size_t ctx_size = ggml_tensor_overhead()*max_n_tensors;
 
     std::map<ggml_backend_buffer_type_t, ggml_context *> ctx_map;
+    // 定义获取缓冲区类型上下文的lambda函数
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
@@ -1374,6 +1415,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     // create tensors for the weights
     {
         // note: cast to int64_t since we will use these for the tensor dimensions
+        // 超参数准备
         const int64_t n_head        = hparams.n_head();
         const int64_t n_head_kv     = hparams.n_head_kv();
         const int64_t n_embd        = hparams.n_embd;
@@ -1394,14 +1436,22 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             throw std::runtime_error("model has expert layers but no expert layers are used");
         }
 
+        // 跟踪张量在不同计算设备/缓冲区类型之间的移动情况
         int n_moved_tensors = 0;
         ggml_tensor * first_moved_tensor = nullptr;
         ggml_backend_buffer_type_t first_moved_from_buft = nullptr;
         ggml_backend_buffer_type_t first_moved_to_buft = nullptr;
 
         auto create_tensor = [&](const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) -> ggml_tensor * {
+            // tn: 张量名称实现，包含标识信息
+            // ne: 张量的维度
+            // flags: 控制张量创建的标志位
+            // 返回: 创建的ggml_tensor指针
+
+            // 获取张量元数据
             ggml_tensor * t_meta = ml.get_tensor_meta(tn.str().c_str());
 
+            // 检查张量是否存在
             if (!t_meta) {
                 if (flags & TENSOR_NOT_REQUIRED) {
                     return nullptr;
@@ -1409,6 +1459,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                 throw std::runtime_error(format("missing tensor '%s'", tn.str().c_str()));
             }
 
+            // 处理特殊情况，如token embedding可能被复用为output tensor
             // some models use the token embedding tensor as the output, but since these are used in different layers and with different ops
             // the tensor is duplicated
             // to handle this, we check if the tensor is duplicated, and if so, we assume that it is being loaded as the output tensor
@@ -1419,12 +1470,14 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
             llm_tensor_info info;
             try {
+                // 获取张量信息
                 info = llm_tensor_info_for(tn_tensor);
             } catch (const std::out_of_range & e) {
                 throw std::runtime_error(format("missing tensor info mapping for %s", tn.str().c_str()));
             }
 
             // skip unused tensors
+            // 跳过未使用的张量
             if (info.op == GGML_OP_NONE) {
                 LLAMA_LOG_WARN("model has unused tensor %s -- ignoring\n", tn.str().c_str());
                 ml.n_created++;
@@ -1433,6 +1486,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             }
 
             // tensors with "bias" suffix are always used with GGML_OP_ADD
+            // 确定张量的操作类型
             ggml_op op;
             bool bias = tn.suffix != nullptr && strcmp(tn.suffix, "bias") == 0;
             if (bias) {
@@ -1442,6 +1496,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             }
 
             // sanity checks
+            // 做一些安全检查
             if (info.layer == LLM_TENSOR_LAYER_INPUT || info.layer == LLM_TENSOR_LAYER_OUTPUT) {
                 if (tn.bid != -1) {
                     GGML_ABORT("input/output layer tensor %s used with a layer number", tn.str().c_str());
@@ -1453,6 +1508,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             }
 
             // select the buffer type for this tensor
+            // 为这一层选择相应的缓冲区类型
             buft_list_t * buft_list;
             switch (info.layer) {
                 case LLM_TENSOR_LAYER_INPUT:
@@ -1474,12 +1530,14 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             }
 
             // avoid using a host buffer when using mmap
+            // 使用mmap时避免使用主机缓冲区
             auto * buft_dev = ggml_backend_buft_get_device(buft);
             if (ml.use_mmap && buft_dev && buft == ggml_backend_dev_host_buffer_type(buft_dev)) {
                 auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
                 buft = ggml_backend_dev_buffer_type(cpu_dev);
             }
 
+            // 跟踪张量移动
             if (buft != buft_list->front().second) {
                 n_moved_tensors++;
                 if (!first_moved_tensor) {
@@ -1491,6 +1549,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
             ggml_context * ctx = ctx_for_buft(buft);
 
+            // 检查是否可以复用已有张量
             // if duplicated, check if the original tensor was allocated in the same buffer type context and avoid creating a new one
             if (flags & TENSOR_DUPLICATED) {
                 ggml_tensor * t = ggml_get_tensor(ctx, tn.str().c_str());
@@ -1504,6 +1563,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         layers.resize(n_layer);
 
         // TODO: move to a separate function
+        // 根据具体架构类型创建模型层结构
         const auto tn = LLM_TN(arch);
         switch (arch) {
             case LLM_ARCH_LLAMA:
@@ -3438,8 +3498,10 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    // 已完成张量元数据
     ml.done_getting_tensors();
 
+    // 初始化内存映射
     ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
     pimpl->mappings.reserve(ml.mappings.size());
 
@@ -3451,9 +3513,10 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     const size_t n_max_backend_buffer = ctx_map.size() * ml.files.size();
     pimpl->bufs.reserve(n_max_backend_buffer);
 
+    // 遍历每个上下文(ctx)和缓冲区类型(buft)对，为它们创建适当的后端缓冲区
     for (auto & it : ctx_map) {
-        ggml_backend_buffer_type_t buft = it.first;
-        ggml_context * ctx              = it.second;
+        ggml_backend_buffer_type_t buft = it.first; // 缓冲区类型
+        ggml_context * ctx              = it.second; // GGML上下文
 
         // skip contexts without tensors
         if (ggml_get_first_tensor(ctx) == nullptr) {
@@ -3474,8 +3537,13 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         bool buffer_from_host_ptr_supported = props.caps.buffer_from_host_ptr;
         bool is_default_buft = buft == ggml_backend_dev_buffer_type(dev);
 
+        // 内存映射缓冲区 (零拷贝)
         if (ml.use_mmap && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
             for (uint32_t idx = 0; idx < ml.files.size(); idx++) {
+                // 直接使用内存映射的文件作为缓冲区源
+                // 支持部分映射，只映射上下文实际需要的张量
+                // 对于支持零拷贝(如Apple Silicon上的Metal)的后端特别有效
+                // 允许在模型体积超过加速器内存但小于系统内存时进行部分卸载
                 // only the mmap region containing the tensors in the model is mapped to the backend buffer
                 // this is important for metal with apple silicon: if the entire model could be mapped to a metal buffer, then we could just use metal for all layers
                 // this allows using partial offloading when the model size exceeds the metal buffer size, but not the RAM size
@@ -3495,11 +3563,15 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             }
         }
         else {
+            // 标准缓冲区分配
+            // 为上下文中的所有张量分配一个连续缓冲区
+            // 适用于不支持零拷贝的后端或禁用内存映射的情况
             ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
             if (buf == nullptr) {
                 throw std::runtime_error(format("unable to allocate %s buffer", ggml_backend_buft_name(buft)));
             }
             pimpl->bufs.emplace_back(buf);
+            // 可选地锁定内存，防止系统交换内存到磁盘
             if (use_mlock && ggml_backend_buffer_is_host(buf)) {
                 pimpl->mlock_bufs.emplace_back(new llama_mlock);
                 auto & mlock_buf = pimpl->mlock_bufs.back();
@@ -3518,12 +3590,14 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         for (auto & buf : buf_map) {
             // indicate that this buffer contains weights
             // this is used by ggml_backend_sched to improve op scheduling: ops that use a weight are preferably scheduled to the backend that contains the weight
+            // 将缓冲区标记为包含权重，用于 ggml_backend_sched 优化算子调度
             ggml_backend_buffer_set_usage(buf.second, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
         }
 
         ctx_bufs.emplace_back(ctx, buf_map);
     }
 
+    // GPU卸载信息打印
     if (llama_supports_gpu_offload()) {
         const int n_gpu = std::min(n_gpu_layers, int(hparams.n_layer));
 
@@ -3539,11 +3613,13 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     }
 
     // print memory requirements per buffer type
+    // 打印每种缓冲区类型的内存需求
     for (auto & buf : pimpl->bufs) {
         LLAMA_LOG_INFO("%s: %12s model buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get()) / 1024.0 / 1024.0);
     }
 
     // populate tensors_by_name
+    // 填充张量名称索引
     for (auto & ctx : pimpl->ctxs) {
         for (auto * cur = ggml_get_first_tensor(ctx.get()); cur != NULL; cur = ggml_get_next_tensor(ctx.get(), cur)) {
             tensors_by_name.emplace_back(ggml_get_name(cur), cur);
@@ -3551,6 +3627,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     }
 
     // load tensor data
+    // 加载张量数据
     for (auto & it : ctx_bufs) {
         ggml_context * ctx = it.first;
         auto & bufs = it.second;
@@ -3801,7 +3878,7 @@ struct llama_model_params llama_model_default_params() {
         /*.progress_callback_user_data =*/ nullptr,
         /*.kv_overrides                =*/ nullptr,
         /*.vocab_only                  =*/ false,
-        /*.use_mmap                    =*/ true,
+        /*.use_mmap                    =*/ true, // 默认使用 mmap
         /*.use_mlock                   =*/ false,
         /*.check_tensors               =*/ false,
     };

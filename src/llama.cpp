@@ -44,27 +44,32 @@ static int llama_model_load(const std::string & fname, std::vector<std::string> 
     try {
         llama_model_loader ml(fname, splits, params.use_mmap, params.check_tensors, params.kv_overrides);
 
+        // 输出模型文件信息
         ml.print_info();
 
         model.hparams.vocab_only = params.vocab_only;
 
         try {
+            // 判断模型架构是否支持
             model.load_arch(ml);
         } catch(const std::exception & e) {
             throw std::runtime_error("error loading model architecture: " + std::string(e.what()));
         }
         try {
+            // 加载超参数
             model.load_hparams(ml);
         } catch(const std::exception & e) {
             throw std::runtime_error("error loading model hyperparameters: " + std::string(e.what()));
         }
         try {
+            // 加载词汇表
             model.load_vocab(ml);
         } catch(const std::exception & e) {
             throw std::runtime_error("error loading model vocabulary: " + std::string(e.what()));
         }
 
         model.load_stats(ml);
+        // 输出模型信息，包括词汇表信息
         model.print_info();
 
         if (params.vocab_only) {
@@ -72,6 +77,7 @@ static int llama_model_load(const std::string & fname, std::vector<std::string> 
             return 0;
         }
 
+        // 加载张量
         if (!model.load_tensors(ml)) {
             return -2;
         }

@@ -1342,6 +1342,7 @@ private:
     const llama_vocab & vocab;
 };
 
+// 加载词汇表
 void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
     struct gguf_context * ctx = ml.meta.get();
 
