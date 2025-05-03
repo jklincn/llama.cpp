@@ -843,16 +843,22 @@ void llama_model_loader::done_getting_tensors() const {
 
 void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps) {
     if (use_mmap) {
+        // 预分配
         mappings.reserve(files.size());
         mmaps_used.reserve(files.size());
         for (const auto & file : files) {
+            // 检测系统是否为 NUMA
             auto * reg = ggml_backend_dev_backend_reg(ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU));
             auto * is_numa_fn = (decltype(ggml_is_numa) *) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cpu_is_numa");
+            // 创建内存映射
             std::unique_ptr<llama_mmap> mapping = std::make_unique<llama_mmap>(file.get(), prefetch ? -1 : 0, is_numa_fn());
             mmaps_used.emplace_back(mapping->size(), 0);
+            // 内存锁定
             if (mlock_mmaps) {
                 std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());
+                // 传入映射的内存地址（mapping->addr()），初始化锁定
                 mlock_mmap->init(mapping->addr());
+                // 将 llama_mlock 对象存储到 mlock_mmaps 中
                 mlock_mmaps->emplace_back(std::move(mlock_mmap));
             }
             mappings.emplace_back(std::move(mapping));
@@ -860,6 +866,7 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
     }
 
     // compute the total size of all tensors for progress reporting
+    // 计算张量数据大小
     for (const auto & it : weights_map) {
         size_data += ggml_nbytes(it.second.tensor);
     }
@@ -925,6 +932,7 @@ bool llama_model_loader::load_all_data(
     std::vector<ggml_backend_event_t> events;
     std::vector<void *> host_ptrs;
     size_t buffer_idx = 0; // buffer to use for async loads
+    // 初始化异步上传后端
     ggml_backend_t upload_backend = [&](const char * func) -> ggml_backend_t {
         if (use_mmap || check_tensors) {
             return nullptr;
@@ -1005,6 +1013,7 @@ bool llama_model_loader::load_all_data(
             ggml_backend_name(upload_backend));
     }
 
+    // 遍历上下文中的张量
     for (struct ggml_tensor * cur = ggml_get_first_tensor(ctx); cur != NULL; cur = ggml_get_next_tensor(ctx, cur)) {
         const auto * weight = get_weight(ggml_get_name(cur));
         if (weight == nullptr) {
@@ -1021,13 +1030,17 @@ bool llama_model_loader::load_all_data(
         size_t n_size = ggml_nbytes(cur);
 
         if (use_mmap) {
+            // 从 mappings 获取 mmap 映射
             const auto & mapping = mappings.at(weight->idx);
+            // 从 bufs 获取缓冲区（buf_mmap）
             ggml_backend_buffer_t buf_mmap = nullptr;
             if (bufs.count(weight->idx)) {
                 buf_mmap = bufs.at(weight->idx);
             }
+            // 计算 mmap 地址：data = mapping->addr() + weight->offs
             uint8_t * data = (uint8_t *) mapping->addr() + weight->offs;
 
+            // 如果启用 check_tensors，异步验证数据
             if (check_tensors) {
                 validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
                     return std::make_pair(cur, ggml_validate_row_data(cur->type, data, n_size));
@@ -1035,17 +1048,21 @@ bool llama_model_loader::load_all_data(
             }
 
             GGML_ASSERT(buf_mmap || cur->data); // either we have a buffer to allocate the tensor in, or it is already allocated
+            // 如果 buf_mmap 存在且张量未分配（cur->data == nullptr）
             if (buf_mmap && cur->data == nullptr) {
+                // 分配张量到 buf_mmap，绑定 data
                 ggml_backend_tensor_alloc(buf_mmap, cur, data);
+                // 如果提供 lmlocks，锁定内存（lmlock->grow_to）
                 if (lmlocks) {
                     const auto & lmlock = lmlocks->at(weight->idx);
                     lmlock->grow_to(weight->offs + n_size);
                 }
-
+                // 更新 mmaps_used 跟踪使用的映射范围
                 auto & mmap_used = mmaps_used[weight->idx];
                 mmap_used.first  = std::min(mmap_used.first,  weight->offs);
                 mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
             } else {
+                // 直接设置张量数据
                 ggml_backend_tensor_set(cur, data, 0, n_size);
             }
         } else {
@@ -1089,10 +1106,12 @@ bool llama_model_loader::load_all_data(
             }
         }
 
+        // 更新加载进度
         size_done += n_size;
     }
 
     // free temporary resources used for async uploads
+    // 清理临时资源
     for (auto * event : events) {
         ggml_backend_event_synchronize(event);
         ggml_backend_event_free(event);
@@ -1103,6 +1122,7 @@ bool llama_model_loader::load_all_data(
     ggml_backend_free(upload_backend);
 
     // check validation results
+    // 检查异步验证结果
     bool validation_failed = false;
     for (auto & future : validation_result) {
         auto result = future.get();
@@ -1116,6 +1136,7 @@ bool llama_model_loader::load_all_data(
     }
 
     // check if this is the last call and do final cleanup
+    // 如果所有数据加载完成（size_done >= size_data），清理 mmap 映射的未使用部分，调用最终进度回调。
     if (size_done >= size_data) {
         // unmap offloaded tensors and metadata
         if (use_mmap) {

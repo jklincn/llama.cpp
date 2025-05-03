@@ -274,28 +274,37 @@ struct llama_mmap::impl {
     std::vector<std::pair<size_t, size_t>> mapped_fragments;
 
     impl(struct llama_file * file, size_t prefetch, bool numa) {
+        // 记录文件的大小
         size = file->size();
+        // 获取文件的描述符
         int fd = file->file_id();
+        // 设置映射标志
         int flags = MAP_SHARED;
+        // 如果 numa 为 true，则禁用预取 prefetch = 0
         if (numa) { prefetch = 0; }
 #ifdef __linux__
+        // 通知操作系统文件将按顺序访问，优化文件系统的预读行为
         if (posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL)) {
             LLAMA_LOG_WARN("warning: posix_fadvise(.., POSIX_FADV_SEQUENTIAL) failed: %s\n",
                     strerror(errno));
         }
+        // 添加预取标志
         if (prefetch) { flags |= MAP_POPULATE; }
 #endif
+        // 执行内存映射（让操作系统选择虚拟内存地址，映射整个文件，只读，偏移量为 0）
         addr = mmap(NULL, file->size(), PROT_READ, flags, fd, 0);
         if (addr == MAP_FAILED) {
             throw std::runtime_error(format("mmap failed: %s", strerror(errno)));
         }
 
+        // 预取优化
         if (prefetch > 0) {
             if (posix_madvise(addr, std::min(file->size(), prefetch), POSIX_MADV_WILLNEED)) {
                 LLAMA_LOG_WARN("warning: posix_madvise(.., POSIX_MADV_WILLNEED) failed: %s\n",
                         strerror(errno));
             }
         }
+        // NUMA 优化，设置内存访问模式为随机（POSIX_MADV_RANDOM）
         if (numa) {
             if (posix_madvise(addr, file->size(), POSIX_MADV_RANDOM)) {
                 LLAMA_LOG_WARN("warning: posix_madvise(.., POSIX_MADV_RANDOM) failed: %s\n",
@@ -303,6 +312,7 @@ struct llama_mmap::impl {
             }
         }
 
+        // 记录映射片段
         mapped_fragments.emplace_back(0, file->size());
     }
 

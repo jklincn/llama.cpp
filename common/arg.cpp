@@ -2269,8 +2269,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--override-tensor", "-ot"}, "<tensor name pattern>=<buffer type>,...",
         "override tensor buffer type", [](common_params & params, const std::string & value) {
+            // 对 --override-tensor 的处理
             /* static */ std::map<std::string, ggml_backend_buffer_type_t> buft_list;
             if (buft_list.empty()) {
+                // 枚举所有设备并加入缓冲区类型
                 // enumerate all the devices and add their buffer types to the list
                 for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
                     auto * dev = ggml_backend_dev_get(i);
@@ -2286,10 +2288,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 if (pos == std::string::npos) {
                     throw std::invalid_argument("invalid value");
                 }
+                // 解析规则，得到张量名和设备类型
                 std::string tensor_name = override.substr(0, pos);
                 std::string buffer_type = override.substr(pos + 1);
 
                 if (buft_list.find(buffer_type) == buft_list.end()) {
+                    // 检查是否匹配缓冲区类型
                     printf("Available buffer types:\n");
                     for (const auto & it : buft_list) {
                         printf("  %s\n", ggml_backend_buft_name(it.second));
@@ -2324,6 +2328,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             if (arg_next == "none") {
                 params.split_mode = LLAMA_SPLIT_MODE_NONE;
             } else if (arg_next == "layer") {
+                // 默认是 LLAMA_SPLIT_MODE_LAYER
                 params.split_mode = LLAMA_SPLIT_MODE_LAYER;
             } else if (arg_next == "row") {
                 params.split_mode = LLAMA_SPLIT_MODE_ROW;

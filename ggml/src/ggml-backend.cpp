@@ -1655,14 +1655,18 @@ enum ggml_status ggml_backend_view_init(struct ggml_tensor * tensor) {
 }
 
 enum ggml_status ggml_backend_tensor_alloc(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, void * addr) {
+    // 确保张量处于未分配状态
     GGML_ASSERT(tensor->buffer == NULL);
     GGML_ASSERT(tensor->data == NULL);
     GGML_ASSERT(tensor->view_src == NULL);
+    // 地址有效性检查
     GGML_ASSERT(addr >= ggml_backend_buffer_get_base(buffer));
     GGML_ASSERT((char *)addr + ggml_backend_buffer_get_alloc_size(buffer, tensor) <=
                 (char *)ggml_backend_buffer_get_base(buffer) + ggml_backend_buffer_get_size(buffer));
 
+    // 张量绑定到该缓冲区
     tensor->buffer = buffer;
+    // 指定张量数据的内存地址
     tensor->data = addr;
     return ggml_backend_buffer_init_tensor(buffer, tensor);
 }

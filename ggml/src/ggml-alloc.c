@@ -90,18 +90,22 @@ struct ggml_tallocr ggml_tallocr_new(ggml_backend_buffer_t buffer) {
 }
 
 enum ggml_status ggml_tallocr_alloc(struct ggml_tallocr * talloc, struct ggml_tensor * tensor) {
+    // 计算张量所需内存大小
     size_t size = ggml_backend_buffer_get_alloc_size(talloc->buffer, tensor);
     size = GGML_PAD(size, talloc->alignment);
 
+    // 检查缓冲区空间
     if (talloc->offset + size > ggml_backend_buffer_get_size(talloc->buffer)) {
         GGML_LOG_ERROR("%s: not enough space in the buffer to allocate %s (needed %zu, available %zu)\n",
                 __func__, tensor->name, size, ggml_backend_buffer_get_size(talloc->buffer) - talloc->offset);
         GGML_ABORT("not enough space in the buffer");
     }
 
+    // 计算内存地址并更新偏移量
     void * addr = (char *)ggml_backend_buffer_get_base(talloc->buffer) + talloc->offset;
     talloc->offset += size;
 
+    // 验证内存对齐
     assert(((uintptr_t)addr % talloc->alignment) == 0);
 
     return ggml_backend_tensor_alloc(talloc->buffer, tensor, addr);
@@ -945,6 +949,8 @@ static bool alloc_tensor_range(struct ggml_context * ctx,
         ggml_backend_buffer_type_t buft, size_t size,
         ggml_backend_buffer_t ** buffers, size_t * n_buffers) {
 
+    // 分配一个大小为 size 的后端缓冲区
+    // 实际申请内存空间
     ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(buft, size);
     if (buffer == NULL) {
         GGML_LOG_ERROR("%s: failed to allocate %s buffer of size %zu\n", __func__, ggml_backend_buft_name(buft), size);
@@ -952,22 +958,28 @@ static bool alloc_tensor_range(struct ggml_context * ctx,
         return false;
     }
 
+    // 使用 realloc 扩展 buffers 数组，为新分配的 buffer 预留空间。
     *buffers = realloc(*buffers, sizeof(ggml_backend_buffer_t) * (*n_buffers + 1));
     (*buffers)[(*n_buffers)++] = buffer;
 
+    // 初始化张量分配器，管理缓冲区内的内存分配
     struct ggml_tallocr tallocr = ggml_tallocr_new(buffer);
 
+    // 遍历张量并分配/初始化内存
     for (struct ggml_tensor * t = first; t != last; t = ggml_get_next_tensor(ctx, t)) {
         enum ggml_status status = GGML_STATUS_SUCCESS;
         if (t->data == NULL) {
             if (t->view_src == NULL) {
+                // 未分配内存的普通张量
                 status = ggml_tallocr_alloc(&tallocr, t);
             } else if (t->buffer == NULL) {
+                // 未分配缓冲区的视图张量
                 status = ggml_backend_view_init(t);
             }
         } else {
             if (t->view_src != NULL && t->buffer == NULL) {
                 // view of a pre-allocated tensor
+                // 已分配内存的视图张量
                 status = ggml_backend_view_init(t);
             }
         }
@@ -991,15 +1003,21 @@ ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors_from_buft(struct ggml_conte
     size_t n_buffers = 0;
 
     size_t cur_buf_size = 0;
+    
+    // 遍历张量并进行分配
+    // 这里的分配逻辑有点笨：先进行累加，当超过最大值时，分配一个。然后在循环结束后再把剩余的再做一次分配。
     struct ggml_tensor * first = ggml_get_first_tensor(ctx);
     for (struct ggml_tensor * t = first; t != NULL; t = ggml_get_next_tensor(ctx, t)) {
         size_t this_size = 0;
+        // 对于每个张量 t，检查是否需要分配内存（尚未分配内存/不是其他张量的视图）
         if (t->data == NULL && t->view_src == NULL) {
+            // 计算张量所需内存大小
             this_size = GGML_PAD(ggml_backend_buft_get_alloc_size(buft, t), alignment);
         }
 
         if (cur_buf_size > 0 && (cur_buf_size + this_size) > max_size) {
             // allocate tensors in the current buffer
+            // 创建新缓冲区
             if (!alloc_tensor_range(ctx, first, t, buft, cur_buf_size, &buffers, &n_buffers)) {
                 return NULL;
             }
@@ -1017,6 +1035,7 @@ ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors_from_buft(struct ggml_conte
         }
     }
 
+    // 如果没有分配任何缓冲区（n_buffers == 0），说明所有张量已经分配或无需分配
     if (n_buffers == 0) {
 #ifndef NDEBUG
         GGML_LOG_DEBUG("%s: all tensors in the context are already allocated\n", __func__);
@@ -1024,10 +1043,12 @@ ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors_from_buft(struct ggml_conte
         return NULL;
     }
 
+    // 只分配了一个缓冲区，直接返回 buffers[0]
     ggml_backend_buffer_t buffer;
     if (n_buffers == 1) {
         buffer = buffers[0];
     } else {
+        // 创建一个组合缓冲区
         buffer = ggml_backend_multi_buffer_alloc_buffer(buffers, n_buffers);
     }
     free(buffers);

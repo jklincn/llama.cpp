@@ -387,30 +387,33 @@ struct LLM_KV {
 //   std::string name = tn(LLM_TENSOR_ATTN_NORM, "weight", 3);     -> "blk.3.attn_norm.weight"
 //
 struct LLM_TN_IMPL {
-    const llm_arch     arch;
-    const llm_tensor   tensor;
-    const char * const suffix;
-    const int          bid;
-    const int          xid;
+    const llm_arch     arch;    // 模型架构类型
+    const llm_tensor   tensor;  // 张量类型
+    const char * const suffix;  // 张量名称的后缀
+    const int          bid;     // 块索引（block index）
+    const int          xid;     // 额外索引（extra index）
 
-    std::string str() const;
+    std::string str() const; // 将结构体转换为字符串表示
 
-    operator std::string() const { return str(); }
+    operator std::string() const { return str(); } // 隐式转换为字符串
 
     friend bool operator==(const std::string & str, const LLM_TN_IMPL & tn) { return str == tn.str(); }
 
     friend bool operator!=(const std::string & str, const LLM_TN_IMPL & tn) { return str != tn.str(); }
 };
 
+// 管理张量名称的辅助结构体
 struct LLM_TN {
-    LLM_TN(llm_arch arch) : arch(arch) {}
+    LLM_TN(llm_arch arch) : arch(arch) {} // 构造函数，初始化模型架构
 
-    llm_arch arch;
+    llm_arch arch; // 模型架构类型
 
+    // 带后缀的版本
     LLM_TN_IMPL operator()(llm_tensor tensor, const char * suffix, int bid = -1, int xid = -1) const {
         return { arch, tensor, suffix, bid, xid };
     }
 
+    // 无后缀的版本
     LLM_TN_IMPL operator()(llm_tensor tensor, int bid = -1, int xid = -1) const {
         return { arch, tensor, nullptr, bid, xid };
     }

@@ -150,10 +150,9 @@ int main(int argc, char ** argv) {
 
     std::vector<common_chat_msg> chat_msgs;
 
-    // 模型加载
     // load the model and apply lora adapter, if any
     LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
-    // 模型初始化
+    // 模型加载
     common_init_result llama_init = common_init_from_params(params);
 
     model = llama_init.model.get();

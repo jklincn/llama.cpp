@@ -137,6 +137,7 @@ extern "C" {
     };
 
     // functionality supported by the device
+    // 设备支持的功能
     struct ggml_backend_dev_caps {
         // asynchronous operations
         bool async;
