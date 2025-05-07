@@ -38,6 +38,7 @@
 
 #include "ggml-sycl/backend.hpp"
 #include "ggml-sycl/common.hpp"
+#include "ggml-sycl/element_wise.hpp"
 #include "ggml-sycl/presets.hpp"
 #include "ggml-sycl/gemm.hpp"
 #include "ggml-sycl/sycl_hw.hpp"
@@ -192,7 +193,7 @@ static void ggml_check_sycl() try {
 
     if (!initialized) {
         g_ggml_sycl_debug = get_sycl_env("GGML_SYCL_DEBUG", 0);
-        g_ggml_sycl_disable_optimize= get_sycl_env("GGML_SYCL_DISABLE_OPT", 0);
+        g_ggml_sycl_disable_optimize= get_sycl_env("GGML_SYCL_DISABLE_OPT", 1);
         g_ggml_sycl_disable_graph = get_sycl_env("GGML_SYCL_DISABLE_GRAPH", 1);
         GGML_SYCL_DEBUG("[SYCL] call ggml_check_sycl\n");
         GGML_LOG_INFO("Running with Environment Variables:\n");
@@ -337,7 +338,7 @@ ggml_backend_sycl_buffer_init_tensor(ggml_backend_buffer_t buffer,
         assert(tensor->view_src->buffer->buft == buffer->buft);
         return GGML_STATUS_SUCCESS;
     }
-    if (tensor->type == GGML_TYPE_Q4_0) {
+    if (tensor->type == GGML_TYPE_Q4_0 && !g_ggml_sycl_disable_optimize) {
         ggml_tensor_extra_gpu * extra = new ggml_tensor_extra_gpu{};
         tensor->extra                 = extra;
         ctx->tensor_extras.push_back(extra);  //used to release it when destroy ctx.
@@ -3355,6 +3356,15 @@ static bool ggml_sycl_compute_forward(ggml_backend_sycl_context & ctx, struct gg
                 case GGML_UNARY_OP_EXP:
                     ggml_sycl_exp(ctx, dst);
                     break;
+                case GGML_UNARY_OP_SGN:
+                    ggml_sycl_sgn(ctx, dst);
+                    break;
+                case GGML_UNARY_OP_ABS:
+                    ggml_sycl_abs(ctx, dst);
+                    break;
+                case GGML_UNARY_OP_ELU:
+                    ggml_sycl_elu(ctx, dst);
+                    break;
                 default:
                     return false;
             }
@@ -3837,6 +3847,9 @@ static bool ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, const g
                 case GGML_UNARY_OP_GELU_QUICK:
                 case GGML_UNARY_OP_TANH:
                 case GGML_UNARY_OP_EXP:
+                case GGML_UNARY_OP_SGN:
+                case GGML_UNARY_OP_ABS:
+                case GGML_UNARY_OP_ELU:
 #if defined (GGML_SYCL_F16)
                     return ggml_is_contiguous(op->src[0]) && (op->type == op->src[0]->type);
 #else
@@ -3858,6 +3871,9 @@ static bool ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, const g
                     b = op->src[1];
                 }
                 if (a->ne[3] != b->ne[3]) {
+                    return false;
+                }
+                if (!ggml_is_contiguous(b)) {
                     return false;
                 }
                 ggml_type a_type = a->type;
