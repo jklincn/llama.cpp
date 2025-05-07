@@ -25,6 +25,7 @@ llama_context::llama_context(
     t_start_us = model.t_start_us;
     t_load_us  = model.t_load_us;
 
+    // 获取模型超参
     const auto & hparams = model.hparams;
 
     cparams.n_seq_max        = std::max(1u, params.n_seq_max);
@@ -42,6 +43,7 @@ llama_context::llama_context(
     cparams.pooling_type     = params.pooling_type;
     cparams.warmup           = false;
 
+    // 用超参填补缺省值
     cparams.n_ctx            = params.n_ctx           == 0    ? hparams.n_ctx_train           : params.n_ctx;
     cparams.rope_freq_base   = params.rope_freq_base  == 0.0f ? hparams.rope_freq_base_train  : params.rope_freq_base;
     cparams.rope_freq_scale  = params.rope_freq_scale == 0.0f ? hparams.rope_freq_scale_train : params.rope_freq_scale;
@@ -53,6 +55,7 @@ llama_context::llama_context(
     cparams.cb_eval           = params.cb_eval;
     cparams.cb_eval_user_data = params.cb_eval_user_data;
 
+    // rope 相关
     auto rope_scaling_type = params.rope_scaling_type;
     if (rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED) {
         rope_scaling_type = hparams.rope_scaling_type_train;
@@ -108,6 +111,7 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: freq_base     = %.1f\n", __func__, cparams.rope_freq_base);
     LLAMA_LOG_INFO("%s: freq_scale    = %g\n",   __func__, cparams.rope_freq_scale);
 
+    // 当前上下文长度小于模型训练时的上下文长度，意味着模型的能力没有被完整利用
     if (n_ctx_per_seq < hparams.n_ctx_train) {
         LLAMA_LOG_WARN("%s: n_ctx_per_seq (%u) < n_ctx_train (%u) -- the full capacity of the model will not be utilized\n",
                 __func__, n_ctx_per_seq, hparams.n_ctx_train);
@@ -120,8 +124,10 @@ llama_context::llama_context(
 
     logits_all = params.logits_all;
 
+    // 后端初始化（如果仅用于分词则跳过）
     if (!hparams.vocab_only) {
         // GPU backends
+        // 初始化每一个GPU后端，具体入口函数为 ggml_backend_cuda_device_init_backend
         for (auto * dev : model.devices) {
             ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
             if (backend == nullptr) {
@@ -131,6 +137,7 @@ llama_context::llama_context(
         }
 
         // add ACCEL backends (such as BLAS)
+        // 初始化加速器后端
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             ggml_backend_dev_t dev = ggml_backend_dev_get(i);
             if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
@@ -150,6 +157,7 @@ llama_context::llama_context(
         backends.emplace_back(backend_cpu);
 
         // create a list of the set_n_threads functions in the backends
+        // 线程数接口收集（仅CPU和BLAS），CPU 的接口是 ggml_backend_cpu_set_n_threads
         for (auto & backend : backends) {
             ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
             ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
@@ -161,9 +169,11 @@ llama_context::llama_context(
             }
         }
 
+        // 注册外部中断回调
         llama_set_abort_callback(this, params.abort_callback, params.abort_callback_data);
 
         // graph outputs buffer
+        // 输出缓冲区
         {
             // resized during inference when a batch uses more outputs
             if ((uint32_t) output_reserve(params.n_seq_max) < params.n_seq_max) {
@@ -178,19 +188,24 @@ llama_context::llama_context(
 
     // init the memory module
     // TODO: for now, always create a unified KV cache
+    // 内存模块初始化（如果仅用于分词则跳过）
     if (!hparams.vocab_only) {
+        // kv cache 实例化
         kv_self.reset(static_cast<llama_kv_cache_unified *>(model.create_memory()));
 
         LLAMA_LOG_DEBUG("%s: n_ctx = %u\n", __func__, cparams.n_ctx);
 
+        // 模型的上下文窗口大小，根据flash_attn进行填充
         cparams.n_ctx = GGML_PAD(cparams.n_ctx, kv_self->get_padding(cparams));
 
         LLAMA_LOG_DEBUG("%s: n_ctx = %u (padded)\n", __func__, cparams.n_ctx);
 
+        // 确定 KV 缓存的大小和类型
         uint32_t kv_size = cparams.n_ctx;
         ggml_type type_k = params.type_k;
         ggml_type type_v = params.type_v;
 
+        // 循环模型精度为 F32
         if (llama_model_is_recurrent(&model)) {
             // Mamba needs at least as many KV cells as there are sequences kept at any time
             kv_size = std::max((uint32_t) 1, params.n_seq_max);
@@ -202,6 +217,7 @@ llama_context::llama_context(
         GGML_ASSERT(hparams.n_embd_head_k % ggml_blck_size(type_k) == 0);
         GGML_ASSERT(hparams.n_embd_head_v % ggml_blck_size(type_v) == 0);
 
+        // 初始化 KV cache
         if (!kv_self->init(model, cparams, type_k, type_v, kv_size, cparams.offload_kqv)) {
             throw std::runtime_error("failed to initialize self-attention cache");
         }
@@ -218,6 +234,7 @@ llama_context::llama_context(
     }
 
     // init backends
+    // 初始化调度器
     if (!hparams.vocab_only) {
         LLAMA_LOG_DEBUG("%s: enumerating backends\n", __func__);
 
@@ -225,9 +242,11 @@ llama_context::llama_context(
         backend_ptrs.clear();
 
         for (auto & backend : backends) {
+            // 对每个后端取默认的缓冲区类型
             auto * buft = ggml_backend_get_default_buffer_type(backend.get());
             auto backend_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
 
+            // CPU backend 若有 GPU，则优先用第一块 GPU 的 host buffer 加速传输
             if (backend_type == GGML_BACKEND_DEVICE_TYPE_CPU && !model.devices.empty()) {
                 // use the host buffer of the first device CPU for faster transfer of the intermediate state
                 auto * dev = model.devices[0];
@@ -243,6 +262,7 @@ llama_context::llama_context(
 
         LLAMA_LOG_DEBUG("%s: backend_ptrs.size() = %zu\n", __func__, backend_ptrs.size());
 
+        // 推断最大 graph 节点数，用它准备 buf_compute_meta
         const size_t max_nodes = this->graph_max_nodes();
 
         LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
@@ -252,6 +272,7 @@ llama_context::llama_context(
 
         // TODO: move these checks to ggml_backend_sched
         // enabling pipeline parallelism in the scheduler increases memory usage, so it is only done when necessary
+        // 是否启用pipeline‑parallel需满足 多GPU+按层切分+offload KQV+无tensor override 条件
         bool pipeline_parallel =
             model.n_devices() > 1 &&
             model.params.n_gpu_layers > (int) model.hparams.n_layer &&
@@ -259,7 +280,8 @@ llama_context::llama_context(
             cparams.offload_kqv &&
             !model.has_tensor_overrides();
 
-        // pipeline parallelism requires support for async compute and events in all devices
+        // pipeline parallelism requires support for async compute and events in all devices‘
+        // 是否启用 pipeline‑parallel 需所有 GPU 支持 async + events
         if (pipeline_parallel) {
             for (auto & backend : backends) {
                 auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
@@ -278,6 +300,7 @@ llama_context::llama_context(
             }
         }
 
+        // 创建调度器
         sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, pipeline_parallel));
 
         if (pipeline_parallel) {
@@ -286,6 +309,7 @@ llama_context::llama_context(
     }
 
     // reserve worst-case graph
+    // 预留最坏情况下的计算图和缓冲
     if (!hparams.vocab_only) {
         const uint32_t n_seqs = 1; // TODO: worst-case number of sequences
         const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
@@ -366,6 +390,7 @@ llama_context::llama_context(
 
         n_outputs = n_outputs_save;
 
+        // 打印各 backend buffer 实际占用，以及 graph nodes/splits 统计
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
             ggml_backend_t             backend = backend_ptrs[i];
             ggml_backend_buffer_type_t buft    = backend_buft[i];
@@ -1470,7 +1495,10 @@ int llama_context::decode(llama_batch & inp_batch) {
 // output
 //
 
+// 为输出分配内存空间
+// 确保有足够的内存来存储模型的输出结果
 int32_t llama_context::output_reserve(int32_t n_outputs) {
+    // 获取一些变量
     const auto & hparams = model.hparams;
     const auto & vocab   = model.vocab;
 
@@ -1481,6 +1509,7 @@ int32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto n_embd  = hparams.n_embd;
 
     // TODO: use a per-batch flag for logits presence instead
+    // 决定是否需要logits和嵌入向量
     bool has_logits = !cparams.embeddings;
     bool has_embd   =  cparams.embeddings && (cparams.pooling_type == LLAMA_POOLING_TYPE_NONE);
 
@@ -1490,19 +1519,23 @@ int32_t llama_context::output_reserve(int32_t n_outputs) {
         has_embd   = true;
     }
 
+    // 计算logits和嵌入向量所需的大小
     logits_size = has_logits ? n_vocab*n_outputs_max : 0;
     embd_size   = has_embd   ?  n_embd*n_outputs_max : 0;
 
+    // 初始化输出ID数组
     if (output_ids.empty()) {
         // init, never resized afterwards
         output_ids.resize(n_batch);
     }
 
+    // 计算当前缓冲区大小和需要的新大小
     const size_t prev_size = buf_output ? ggml_backend_buffer_get_size(buf_output.get()) : 0;
     const size_t new_size  = (logits_size + embd_size) * sizeof(float);
 
     // alloc only when more than the current capacity is required
     // TODO: also consider shrinking the buffer
+    // 只有当需要更多容量时才重新分配
     if (!buf_output || prev_size < new_size) {
         if (buf_output) {
 #ifndef NDEBUG
@@ -1514,6 +1547,7 @@ int32_t llama_context::output_reserve(int32_t n_outputs) {
             embd = nullptr;
         }
 
+        // 创建新的缓冲区
         auto * buft = ggml_backend_cpu_buffer_type();
         // try to use the host buffer of the device where the output tensor is allocated for faster transfer to system memory
         auto * output_dev = model.dev_output();
@@ -1521,6 +1555,7 @@ int32_t llama_context::output_reserve(int32_t n_outputs) {
         if (output_dev_host_buft) {
             buft = output_dev_host_buft;
         }
+        // 分配缓冲区
         buf_output.reset(ggml_backend_buft_alloc_buffer(buft, new_size));
         if (buf_output == nullptr) {
             LLAMA_LOG_ERROR("%s: failed to allocate output buffer of size %.2f MiB\n", __func__, new_size / (1024.0 * 1024.0));

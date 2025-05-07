@@ -4278,19 +4278,26 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     }
 
     // 打印张量分配结果
-    for (const auto& tensor_pair : tensors_by_name) {
-        const std::string& name = tensor_pair.first;
-        struct ggml_tensor* tensor = tensor_pair.second;
-        
-        std::cout << name;
-        if (tensor != nullptr) {
-            if (tensor->buffer != nullptr) {
-                std::cout << " (" << ggml_backend_buffer_name(tensor->buffer) << ")\n";
+    {
+        std::vector<std::pair<std::string, struct ggml_tensor *>> sorted_tensors_by_name = tensors_by_name;
+        std::sort(sorted_tensors_by_name.begin(), sorted_tensors_by_name.end(),
+        [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+        for (const auto& tensor_pair : sorted_tensors_by_name) {
+            const std::string& name = tensor_pair.first;
+            struct ggml_tensor* tensor = tensor_pair.second;
+            
+            std::cout << name;
+            if (tensor != nullptr) {
+                if (tensor->buffer != nullptr) {
+                    std::cout << " (" << ggml_backend_buffer_name(tensor->buffer) << ")\n";
+                } else {
+                    std::cout << " (nullptr)\n";
+                }
             } else {
-                std::cout << " (nullptr)\n";
+                std::cout << "tensor is nullptr\n";
             }
-        } else {
-            std::cout << "tensor is nullptr\n";
         }
     }
 

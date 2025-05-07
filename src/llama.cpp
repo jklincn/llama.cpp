@@ -215,8 +215,7 @@ static struct llama_model * llama_model_load_from_file_impl(
         model->devices.push_back(main_gpu);
     }
 
-    // 遍历所有设备，打印设备名称、描述和可用内存（MiB）
-    // 看起来不用 GPU 的话，只用CPU是看不到这个的，因为CPU分开处理了
+    // 遍历所有设备（GPU），打印设备名称、描述和可用内存（MiB）
     for (auto * dev : model->devices) {
         size_t free, total; // NOLINT
         ggml_backend_dev_memory(dev, &free, &total);

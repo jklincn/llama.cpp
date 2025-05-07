@@ -878,6 +878,7 @@ struct common_init_result common_init_from_params(common_params & params) {
     // 获得词汇表
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
+    // RAG 相关
     if (params.reranking) {
         bool ok = true;
 
@@ -903,6 +904,7 @@ struct common_init_result common_init_from_params(common_params & params) {
         }
     }
 
+    // 获取上下文参数
     auto cparams = common_context_params_to_llama(params);
 
     // 创建 llama context，涉及 kv cache

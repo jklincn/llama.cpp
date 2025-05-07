@@ -3325,6 +3325,7 @@ static void ggml_backend_cuda_device_event_synchronize(ggml_backend_dev_t dev, g
     CUDA_CHECK(cudaEventSynchronize((cudaEvent_t)event->context));
 }
 
+// GPU 后端设备接口
 static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
     /* .get_name                = */ ggml_backend_cuda_device_get_name,
     /* .get_description         = */ ggml_backend_cuda_device_get_description,
@@ -3486,7 +3487,9 @@ ggml_backend_reg_t ggml_backend_cuda_reg() {
     return &reg;
 }
 
+// CUDA 后端初始化
 ggml_backend_t ggml_backend_cuda_init(int device) {
+    // 检查设备序号
     if (device < 0 || device >= ggml_backend_cuda_get_device_count()) {
         GGML_LOG_ERROR("%s: invalid device %d\n", __func__, device);
         return nullptr;
@@ -3500,9 +3503,9 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
 
     ggml_backend_t cuda_backend = new ggml_backend {
         /* .guid      = */ ggml_backend_cuda_guid(),
-        /* .interface = */ ggml_backend_cuda_interface,
-        /* .device    = */ ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), device),
-        /* .context   = */ ctx,
+        /* .interface = */ ggml_backend_cuda_interface, // 绑定 cuda 接口
+        /* .device    = */ ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), device), // 绑定 cuda 设备（ggml_backend_dev_t）
+        /* .context   = */ ctx, // 绑定上下文
     };
 
     return cuda_backend;

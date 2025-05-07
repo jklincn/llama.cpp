@@ -739,6 +739,7 @@ struct ggml_cuda_graph {
 #endif
 };
 
+// CUDA 上下文
 struct ggml_backend_cuda_context {
     int device;
     std::string name;

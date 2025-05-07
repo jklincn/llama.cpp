@@ -14,6 +14,7 @@
 llama_kv_cache_unified::llama_kv_cache_unified(const llama_hparams & hparams, callbacks cbs) : hparams(hparams), cbs(std::move(cbs)) {
 }
 
+// 设置 KV 缓存，为模型每一层的 K（键）和 V（值）张量分配内存
 bool llama_kv_cache_unified::init(
         const llama_model & model,
       const llama_cparams & cparams,
@@ -21,19 +22,26 @@ bool llama_kv_cache_unified::init(
                 ggml_type   type_v,
                  uint32_t   kv_size,
                      bool   offload) {
+    // 获取模型参数
     const int32_t n_layer = hparams.n_layer;
 
     has_shift = false;
 
+    // 检查提供的模型是否使用循环架构
     recurrent = llama_model_is_recurrent(&model);
+    // 确定 Value 张量是否需要转置
     v_trans   = !recurrent && !cparams.flash_attn;
     can_shift = !recurrent;
 
+    // init: kv_size = 4096, offload = 1, type_k = 'f16', type_v = 'f16', n_layer = 61, can_shift = 1
     LLAMA_LOG_INFO("%s: kv_size = %d, offload = %d, type_k = '%s', type_v = '%s', n_layer = %d, can_shift = %d\n",
             __func__, kv_size, offload, ggml_type_name(type_k), ggml_type_name(type_v), n_layer, can_shift);
 
+    // 缓存的初始写入位置（头指针）
     head = 0;
+    // 缓存的最大容量
     size = kv_size;
+    // 将缓存中当前已用槽位的计数初始化为零
     used = 0;
 
     this->type_k = type_k;
@@ -67,22 +75,29 @@ bool llama_kv_cache_unified::init(
         return it->second;
     };
 
+    // 预留空间，用于存储指向每层 K 和 V 张量的指针，以避免重新分配内存。
     k_l.reserve(n_layer);
     v_l.reserve(n_layer);
 
+    // 遍历模型的每一层
     for (int i = 0; i < n_layer; i++) {
+        // 确定当前层 K 和 V 的嵌入维度
+        // 考虑了分组查询注意力（GQA）和任何共享嵌入 (_s)
         const uint32_t n_embd_k_gqa = hparams.n_embd_k_gqa(i) + hparams.n_embd_k_s();
         const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(i) + hparams.n_embd_v_s();
 
         const char * dev_name = "CPU";
 
+        // 确定缓冲区类型
         ggml_backend_buffer_type_t buft;
         if (offload) {
+            // 如果启用KV卸载到GPU，则获取分配给该层的设备并找到对应的缓冲区类型
             auto * dev = model.dev_layer(i);
             buft = ggml_backend_dev_buffer_type(dev);
 
             dev_name = ggml_backend_dev_name(dev);
         } else {
+            // 否则使用 CPU 类型
             buft = ggml_backend_cpu_buffer_type();
         }
 
@@ -95,14 +110,19 @@ bool llama_kv_cache_unified::init(
             return false;
         }
 
+        // 在选定的上下文中为该层的 K 张量创建元数据，此时尚未为张量的数据分配实际内存
         ggml_tensor * k = ggml_new_tensor_1d(ctx, type_k, n_embd_k_gqa*kv_size);
+        // 类似地创建 V 张量的元数据
         ggml_tensor * v = ggml_new_tensor_1d(ctx, type_v, n_embd_v_gqa*kv_size);
+        // 为张量分配名称，如 "cache_k_l0", "cache_v_l0"
         ggml_format_name(k, "cache_k_l%d", i);
         ggml_format_name(v, "cache_v_l%d", i);
+        // 存储指向这些新创建的张量结构的指针
         k_l.push_back(k);
         v_l.push_back(v);
     }
 
+    // 分配内存缓冲区并初始化
     // allocate tensors and initialize the buffers to avoid NaNs in the padding
     for (auto it : ctx_map) {
         auto * buft = it.first;
@@ -113,6 +133,7 @@ bool llama_kv_cache_unified::init(
             LLAMA_LOG_ERROR("%s: failed to allocate buffer for kv cache\n", __func__);
             return false;
         }
+        // 将整个分配的缓冲区初始化为零
         ggml_backend_buffer_clear(buf, 0);
         LLAMA_LOG_INFO("%s: %10s KV buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
         bufs.emplace_back(buf);
@@ -121,6 +142,7 @@ bool llama_kv_cache_unified::init(
     return true;
 }
 
+// 统计缓存中所有序列存储的单个词元状态的总数
 int32_t llama_kv_cache_unified::get_n_tokens() const {
     int32_t result = 0;
 
@@ -135,8 +157,10 @@ int32_t llama_kv_cache_unified::get_used_cells() const {
     return used;
 }
 
+// 计算 K 和 V 张量缓冲区占用的总内存大小
 size_t llama_kv_cache_unified::total_size() const {
     size_t size = 0;
+    // 遍历 bufs（后端缓冲区）并累加它们报告的大小
     for (const auto & buf : bufs) {
         size += ggml_backend_buffer_get_size(buf.get());
     }
@@ -144,6 +168,7 @@ size_t llama_kv_cache_unified::total_size() const {
     return size;
 }
 
+// 查找当前缓存中任何单元存储的最大词元位置
 llama_pos llama_kv_cache_unified::pos_max() const {
     llama_pos pos_max = -1;
     for (const auto & cell : cells) {
@@ -153,6 +178,7 @@ llama_pos llama_kv_cache_unified::pos_max() const {
     return pos_max;
 }
 
+// 将 KV 缓存重置为空状态
 void llama_kv_cache_unified::clear() {
     for (int32_t i = 0; i < (int32_t) size; ++i) {
         cells[i].pos = -1;
@@ -168,6 +194,8 @@ void llama_kv_cache_unified::clear() {
     }
 }
 
+// 序列移除
+// 移除给定 seq_id 在位置 p0（含）和 p1（不含）之间的缓存状态。如果 seq_id 为负数，则移除该范围内所有序列的状态。
 bool llama_kv_cache_unified::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     uint32_t new_head = size;
 
@@ -241,6 +269,8 @@ bool llama_kv_cache_unified::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
     return true;
 }
 
+// 序列复制
+// 将 seq_id_src 在位置 p0 和 p1 之间的缓存状态复制到 seq_id_dst
 void llama_kv_cache_unified::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
     if (seq_id_src == seq_id_dst) {
         return;
@@ -292,6 +322,7 @@ void llama_kv_cache_unified::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id
     }
 }
 
+// 仅保留指定 seq_id 的缓存状态，并移除所有其他序列的状态
 void llama_kv_cache_unified::seq_keep(llama_seq_id seq_id) {
     uint32_t new_head = size;
 
@@ -324,6 +355,7 @@ void llama_kv_cache_unified::seq_keep(llama_seq_id seq_id) {
     }
 }
 
+// 将 delta 加到与 seq_id关联的、在范围 [p0, p1) 内的词元位置上。这用于实现“上下文移位”（例如，在上下文的开头腾出空间）
 void llama_kv_cache_unified::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) {
     if (delta == 0) {
         return;
@@ -382,6 +414,7 @@ void llama_kv_cache_unified::seq_add(llama_seq_id seq_id, llama_pos p0, llama_po
     head = new_head != size ? new_head : 0;
 }
 
+// 将 seq_id 在范围 [p0, p1) 内的词元位置除以 d。用于位置缩放等技术。
 void llama_kv_cache_unified::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
     if (d == 1) {
         return;
@@ -428,6 +461,7 @@ void llama_kv_cache_unified::seq_div(llama_seq_id seq_id, llama_pos p0, llama_po
     }
 }
 
+// 查找与特定 seq_id 关联的最大词元位置。
 llama_pos llama_kv_cache_unified::seq_pos_max(llama_seq_id seq_id) const {
     llama_pos result = 0;
 
@@ -440,12 +474,14 @@ llama_pos llama_kv_cache_unified::seq_pos_max(llama_seq_id seq_id) const {
     return result;
 }
 
+// 发出信号，表示应该执行 KV 缓存的碎片整理
 void llama_kv_cache_unified::defrag() {
     if (!recurrent) {
         do_defrag = true;
     }
 }
 
+// 撤销对 KV 缓存中任何尚未提交的挂起更改。这是用于事务性更新的提交/恢复机制的一部分。
 void llama_kv_cache_unified::restore() {
     if (pending.ranges.empty()) {
         return;
@@ -480,6 +516,7 @@ void llama_kv_cache_unified::restore() {
     }
 }
 
+// 完成对 KV 缓存的挂起更改
 void llama_kv_cache_unified::commit() {
     // TODO: tmp - move to llama_kv_cache_recurrent
     if (recurrent) {
@@ -495,10 +532,14 @@ void llama_kv_cache_unified::commit() {
     pending.ranges.clear();
 }
 
+// 指示缓存（以及底层模型架构）是否支持高效的上下文移位
 bool llama_kv_cache_unified::get_can_shift() const {
     return can_shift;
 }
 
+// 在缓存中查找一个连续的空闲单元块，以存储输入 ubatch（统一批处理词元）的 KV 状态。
+// 预先写入元信息并把写入范围记到 pending.ranges
+// 调用方如果推理图构建失败→析构 llama_kv_cache_guard →自动 restore() 回滚；成功时显式 commit() 清空挂起记录。
 bool llama_kv_cache_unified::find_slot(
        const llama_ubatch & ubatch) {
     const uint32_t n_tokens = ubatch.n_tokens;
@@ -511,6 +552,7 @@ bool llama_kv_cache_unified::find_slot(
         head = 0;
     }
 
+    // 循环模型
     if (recurrent) {
         // For recurrent state architectures (like Mamba or RWKV),
         // each cache cell can store the state for a whole sequence.
@@ -672,10 +714,10 @@ bool llama_kv_cache_unified::find_slot(
 
         // sanity check
         return n >= n_seqs;
-    }
+    } // end of recurrent
 
     // otherwise, one cell per token.
-
+    // 类 Transformer 模型
     if (n_tokens > size) {
         LLAMA_LOG_ERROR("%s: n_tokens = %d > size = %d\n", __func__, n_tokens, size);
         return false;
@@ -684,6 +726,7 @@ bool llama_kv_cache_unified::find_slot(
     uint32_t n_tested = 0;
 
     while (true) {
+        // 如果 head 远超 used 单元，则将 head 重置为 0
         if (head + n_tokens > size) {
             n_tested += size - head;
             head = 0;
@@ -710,6 +753,7 @@ bool llama_kv_cache_unified::find_slot(
         }
     }
 
+    // 从 ubatch 中填充槽中每个单元的 pos 和 seq_id
     for (uint32_t s = 0; s < n_seqs; s++) {
         for (uint32_t i = 0; i < n_seq_tokens; ++i) {
             uint32_t k = s*n_seq_tokens + i;
@@ -723,16 +767,19 @@ bool llama_kv_cache_unified::find_slot(
 
     used += n_tokens;
 
+    // 将使用的范围 {head, head + n_tokens} 添加到 pending.ranges（用于提交/恢复）。
     pending.ranges.push_back({head, head + n_tokens});
 
     return true;
 }
 
+// 返回 KV 缓存操作所需的填充量
 uint32_t llama_kv_cache_unified::get_padding(const llama_cparams & cparams) const {
     // the FA kernels require padding to avoid extra runtime boundary checks
     return cparams.flash_attn ? 256u : 32u;
 }
 
+// 查找当前正在使用的最高编号单元的索引
 uint32_t llama_kv_cache_unified::cell_max() const {
     for (uint32_t i = size; i > 0; --i) {
         const llama_kv_cell & cell = cells[i - 1];
@@ -745,6 +792,7 @@ uint32_t llama_kv_cache_unified::cell_max() const {
     return 0;
 }
 
+// 计算所有 K 张量使用的总内存
 size_t llama_kv_cache_unified::size_k_bytes() const {
     size_t size_k_bytes = 0;
 
@@ -755,6 +803,7 @@ size_t llama_kv_cache_unified::size_k_bytes() const {
     return size_k_bytes;
 }
 
+// 计算所有 V 张量使用的总内存
 size_t llama_kv_cache_unified::size_v_bytes() const {
     size_t size_v_bytes = 0;
 
@@ -765,6 +814,7 @@ size_t llama_kv_cache_unified::size_v_bytes() const {
     return size_v_bytes;
 }
 
+// 通过识别哪些单元需要移动以整合空闲空间，为缓存的碎片整理做准备
 bool llama_kv_cache_unified::defrag_prepare(int32_t n_max_nodes) {
     const uint32_t n_layer = hparams.n_layer;
 
@@ -902,6 +952,7 @@ bool llama_kv_cache_unified::defrag_prepare(int32_t n_max_nodes) {
     return true;
 }
 
+// 将 KV 缓存的状态（或特定序列的状态）写入输出流 (io)
 void llama_kv_cache_unified::state_write(llama_io_write_i & io, llama_seq_id seq_id) const {
     std::vector<std::pair<uint32_t, uint32_t>> cell_ranges; // ranges, from inclusive, to exclusive
     uint32_t cell_count = 0;
@@ -940,6 +991,7 @@ void llama_kv_cache_unified::state_write(llama_io_write_i & io, llama_seq_id seq
     state_write_data(io, cell_ranges);
 }
 
+// 从输入流 (io) 读取 KV 缓存状态
 void llama_kv_cache_unified::state_read(llama_io_read_i & io, llama_seq_id seq_id) {
     uint32_t cell_count;
     io.read_to(&cell_count, sizeof(cell_count));
