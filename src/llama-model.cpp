@@ -270,6 +270,8 @@ static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hpara
 }
 
 // CPU: ACCEL -> GPU host -> CPU extra -> CPU
+// 调度器在创建张量时会从 buft_list 中按优先级尝试分配，第一个够用并支持该后端 op 的 buffer 就会被用到
+// CPU上的优先级：加速器缓冲区 -> 主机缓冲区 -> 额外缓冲区 -> CPU缓冲区，一般来说就使用 CUDA 接口分配的主机缓冲区
 static buft_list_t make_cpu_buft_list(const std::vector<ggml_backend_dev_t> & devices) {
     buft_list_t buft_list;
 
@@ -292,7 +294,9 @@ static buft_list_t make_cpu_buft_list(const std::vector<ggml_backend_dev_t> & de
     // a better approach would be to handle this on a weight-by-weight basis using the offload_op
     // function of the device to determine if it would benefit from being stored in a host buffer
     // 使用主机缓冲区来优化 CPU 与 GPU 的数据传输
-    // 具体接口是 ggml_backend_cuda_buffer_type_interface
+    // 当较大批次的处理卸载到 GPU 时，把 tensor 放 pinned‑host 能加快 PCIe DMA 传输。
+    // 具体接口是 ggml_backend_cuda_device_get_host_buffer_type
+    // 返回的是 ggml_backend_cuda_buffer_type_host 这个变量
     for (auto * dev : devices) {
         ggml_backend_buffer_type_t buft = ggml_backend_dev_host_buffer_type(dev);
         if (buft) {
@@ -303,6 +307,7 @@ static buft_list_t make_cpu_buft_list(const std::vector<ggml_backend_dev_t> & de
 
     // add extra buffer types, only if no GPU device is present
     // ref: https://github.com/ggml-org/llama.cpp/issues/12481#issuecomment-2743136094
+    // 若系统无 GPU（或没启用），调用反射接口 ggml_backend_dev_get_extra_bufts 获取附加可选 area
     auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
     auto * cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
     auto ggml_backend_dev_get_extra_bufts_fn = (ggml_backend_dev_get_extra_bufts_t)
@@ -316,6 +321,7 @@ static buft_list_t make_cpu_buft_list(const std::vector<ggml_backend_dev_t> & de
     }
 
     // add the CPU buffer type
+    // 最后才把真正的 plain DRAM buft (type = GGML_BACKEND_DEVICE_TYPE_CPU) 加入
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
         if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
@@ -353,6 +359,9 @@ static buft_list_t make_gpu_buft_list(ggml_backend_dev_t dev, llama_split_mode s
     }
 
     // add the device default buffer type
+    // 默认情况下，使用普通显存当作缓冲区
+    // 实际接口是：ggml_backend_cuda_device_get_buffer_type
+    // 返回的是 ggml_backend_cuda_buffer_type
     buft_list.emplace_back(dev, ggml_backend_dev_buffer_type(dev));
 
     return buft_list;

@@ -866,9 +866,11 @@ std::string fs_get_cache_file(const std::string & filename) {
 
 struct common_init_result common_init_from_params(common_params & params) {
     common_init_result iparams;
-    // 模型实例参数
+
+    // 从 CLI 参数中获取模型参数
     auto mparams = common_model_params_to_llama(params);
 
+    // 从硬盘加载权重
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
     if (model == NULL) {
         LOG_ERR("%s: failed to load model '%s'\n", __func__, params.model.path.c_str());
@@ -878,7 +880,7 @@ struct common_init_result common_init_from_params(common_params & params) {
     // 获得词汇表
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
-    // RAG 相关
+    // 若启用 RAG 重排序，必须保证词表含 BOS/EOS/SEP，否则警告并释放模型
     if (params.reranking) {
         bool ok = true;
 
@@ -904,10 +906,10 @@ struct common_init_result common_init_from_params(common_params & params) {
         }
     }
 
-    // 获取上下文参数
+    // 从 CLI 参数中获取上下文参数
     auto cparams = common_context_params_to_llama(params);
 
-    // 创建 llama context，涉及 kv cache
+    // 创建推理上下文
     llama_context * lctx = llama_init_from_model(model, cparams);
     if (lctx == NULL) {
         LOG_ERR("%s: failed to create context with model '%s'\n", __func__, params.model.path.c_str());
@@ -915,11 +917,13 @@ struct common_init_result common_init_from_params(common_params & params) {
         return iparams;
     }
 
+    // KV‑cache 移位能力提醒
     if (params.ctx_shift && !llama_kv_self_can_shift(lctx)) {
         LOG_WRN("%s: KV cache shifting is not supported for this context, disabling KV cache shifting\n", __func__);
         params.ctx_shift = false;
     }
 
+    // 加载用户给定.npz /.bin控制向量并通过 llama_apply_adapter_cvec() 叠加到层权重区间 [layer_start,layer_end]
     if (!params.control_vectors.empty()) {
         if (params.control_vector_layer_start <= 0) params.control_vector_layer_start = 1;
         if (params.control_vector_layer_end   <= 0) params.control_vector_layer_end   = llama_model_n_layer(model);
@@ -948,6 +952,7 @@ struct common_init_result common_init_from_params(common_params & params) {
     }
 
     // load and optionally apply lora adapters
+    // LoRA / LoRA‑plus 适配器相关
     for (auto & la : params.lora_adapters) {
         llama_adapter_lora_ptr lora;
         lora.reset(llama_adapter_lora_init(model, la.path.c_str()));
@@ -966,6 +971,7 @@ struct common_init_result common_init_from_params(common_params & params) {
         common_set_adapter_lora(lctx, params.lora_adapters);
     }
 
+    // 采样逻辑预处理
     if (params.sampling.ignore_eos && llama_vocab_eos(vocab) == LLAMA_TOKEN_NULL) {
         LOG_WRN("%s: warning: vocab does not have an EOS token, ignoring --ignore-eos\n", __func__);
         params.sampling.ignore_eos = false;
@@ -990,11 +996,14 @@ struct common_init_result common_init_from_params(common_params & params) {
         params.sampling.dry_penalty_last_n = llama_n_ctx(lctx);
     }
 
+    // warm‑up 空推理
+    // 作用：提前 JIT / GPU 占位，测试显存，避免首次真实推理的抖动。
     if (params.warmup) {
         LOG_WRN("%s: warming up the model with an empty run - please wait ... (--no-warmup to disable)\n", __func__);
 
         llama_set_warmup(lctx, true);
 
+        // 构造一个极短 token 序列
         std::vector<llama_token> tmp;
         llama_token bos = llama_vocab_bos(vocab);
         llama_token eos = llama_vocab_eos(vocab);
@@ -1010,6 +1019,7 @@ struct common_init_result common_init_from_params(common_params & params) {
             tmp.push_back(0);
         }
 
+        // 针对 encoder、decoder 分别调用 llama_encode / llama_decode，跑一次前向
         if (llama_model_has_encoder(model)) {
             llama_encode(lctx, llama_batch_get_one(tmp.data(), tmp.size()));
             llama_token decoder_start_token_id = llama_model_decoder_start_token(model);
@@ -1022,12 +1032,14 @@ struct common_init_result common_init_from_params(common_params & params) {
         if (llama_model_has_decoder(model)) {
             llama_decode(lctx, llama_batch_get_one(tmp.data(), std::min(tmp.size(), (size_t) params.n_batch)));
         }
+        // 清 KV、同步、重置性能计数后关掉 warm‑up。
         llama_kv_self_clear(lctx);
         llama_synchronize(lctx);
         llama_perf_context_reset(lctx);
         llama_set_warmup(lctx, false);
     }
 
+    // 把 model 与 lctx 包装进 shared_ptr 存入 iparams 返回给主程序
     iparams.model.reset(model);
     iparams.context.reset(lctx);
 

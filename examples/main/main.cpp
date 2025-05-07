@@ -92,7 +92,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // 初始化，看起来只有日志初始化，输出构建信息
+    // 日志/控制台初始化
     common_init();
 
     // 采样参数
@@ -119,6 +119,7 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
+    // 修正最小上下文长度
     if (params.n_ctx != 0 && params.n_ctx < 8) {
         LOG_WRN("%s: warning: minimum context size is 8, using minimum size.\n", __func__);
         params.n_ctx = 8;
@@ -152,7 +153,8 @@ int main(int argc, char ** argv) {
 
     // load the model and apply lora adapter, if any
     LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
-    // 模型加载
+
+    // 加载模型与 LoRA 适配器
     common_init_result llama_init = common_init_from_params(params);
 
     model = llama_init.model.get();
@@ -168,6 +170,7 @@ int main(int argc, char ** argv) {
 
     LOG_INF("%s: llama threadpool init, n_threads = %d\n", __func__, (int) params.cpuparams.n_threads);
 
+    // 线程池创建
     auto * reg = ggml_backend_dev_backend_reg(ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU));
     auto * ggml_threadpool_new_fn = (decltype(ggml_threadpool_new) *) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_new");
     auto * ggml_threadpool_free_fn = (decltype(ggml_threadpool_free) *) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_free");
@@ -207,6 +210,7 @@ int main(int argc, char ** argv) {
     }
 
     // auto enable conversation mode if chat template is available
+    // 会话/聊天模式自动判断
     const bool has_chat_template = common_chat_templates_was_explicit(chat_templates.get());
     if (params.conversation_mode == COMMON_CONVERSATION_MODE_AUTO) {
         if (has_chat_template) {
@@ -242,6 +246,7 @@ int main(int argc, char ** argv) {
         LOG_INF("\n");
     }
 
+    // 会话缓存
     std::string path_session = params.path_prompt_cache;
     std::vector<llama_token> session_tokens;
 
@@ -284,6 +289,7 @@ int main(int argc, char ** argv) {
         return formatted;
     };
 
+    // 把 system/user 消息格式化并生成真实 prompt 字符串
     std::string prompt;
     {
         if (params.conversation_mode && params.enable_chat_template) {
@@ -335,6 +341,7 @@ int main(int argc, char ** argv) {
     }
 
     // Tokenize negative prompt
+    // 必要时补 BOS
     if ((int) embd_inp.size() > n_ctx - 4) {
         LOG_ERR("%s: prompt is too long (%d tokens, max %d)\n", __func__, (int) embd_inp.size(), n_ctx - 4);
         return 1;
@@ -470,6 +477,7 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // 采样器初始化
     smpl = common_sampler_init(model, sparams);
     if (!smpl) {
         LOG_ERR("%s: failed to initialize sampling subsystem\n", __func__);
@@ -701,6 +709,7 @@ int main(int argc, char ** argv) {
 
         embd.clear();
 
+        // 所有 prompt token 已送达 且 非交互态
         if ((int) embd_inp.size() <= n_consumed && !is_interacting) {
             // optionally save the session on first sample (for faster prompt loading next time)
             if (!path_session.empty() && need_to_save_session && !params.prompt_cache_ro) {
@@ -727,6 +736,7 @@ int main(int argc, char ** argv) {
             LOG_DBG("n_remain: %d\n", n_remain);
         } else {
             // some user input remains from prompt or interaction, forward it to processing
+            // 把剩余 prompt/in‑flight 用户输入送入 embd
             LOG_DBG("embd_inp.size(): %d, n_consumed: %d\n", (int) embd_inp.size(), n_consumed);
             while ((int) embd_inp.size() > n_consumed) {
                 embd.push_back(embd_inp[n_consumed]);
@@ -744,6 +754,7 @@ int main(int argc, char ** argv) {
 
         // display text
         if (input_echo && display) {
+            // 打印到控制台
             for (auto id : embd) {
                 const std::string token_str = common_token_to_piece(ctx, id, params.special);
 
