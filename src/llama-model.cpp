@@ -314,6 +314,9 @@ static buft_list_t make_cpu_buft_list(const std::vector<ggml_backend_dev_t> & de
     // add extra buffer types, only if no GPU device is present
     // ref: https://github.com/ggml-org/llama.cpp/issues/12481#issuecomment-2743136094
     // 若系统无 GPU（或没启用），调用反射接口 ggml_backend_dev_get_extra_bufts 获取附加可选 area
+    // 具体接口是 ggml_backend_cpu_device_get_extra_buffers_type
+    // 返回的是 ggml_backend_buffer_type_amx 和 ggml_backend_cpu_buffer_type_aarch64
+    // 想要使用 AMX 的话，算子需要跳过 GPU 的匹配，不然由于 GPU 主机缓冲区优先级更高，算子会被判断为 offload 到 GPU 执行。
     auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
     auto * cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
     auto ggml_backend_dev_get_extra_bufts_fn = (ggml_backend_dev_get_extra_bufts_t)
@@ -10273,29 +10276,37 @@ struct llm_build_deepseek2 : public llm_graph_context {
         const float kq_scale = 1.0f*mscale*mscale/sqrtf(float(n_embd_head_k));
         const float attn_factor = 1.0f / (1.0f + 0.1f * logf(1.0f / freq_scale));
 
-        ggml_tensor * cur;
-        ggml_tensor * inpL;
+        ggml_tensor * cur;  // 当前层
+        ggml_tensor * inpL; // 输入层
 
         // {n_embd, n_tokens}
+        // 把模型层输入初始化为词嵌入的输出
         inpL = build_inp_embd(model.tok_embd);
 
         // inp_pos - contains the positions
+        // 构建输入位置信息张量，用于 RoPE
         ggml_tensor * inp_pos = build_inp_pos();
 
+        // 为注意力机制的 K/V 缓存构建统一的输入
         auto * inp_attn = build_attn_inp_kv_unified();
 
+        // 逐层构建 Transformer 块
         for (int il = 0; il < n_layer; ++il) {
+            // 保存当前层的输入，用于后续的残差连接 (Self-Attention 部分的残差
             ggml_tensor * inpSA = inpL;
 
+            // 注意力块前置归一化
             // norm
             cur = build_norm(inpL,
                     model.layers[il].attn_norm, NULL,
                     LLM_NORM_RMS, il);
+            // 回调函数
             cb(cur, "attn_norm", il);
 
             // self_attention
             {
                 ggml_tensor * q = NULL;
+                // q = wq_b * norm(wq_a * cur)
                 if (!is_lite) {
                     q = ggml_mul_mat(ctx0, model.layers[il].wq_a, cur);
                     cb(q, "q", il);
@@ -10313,6 +10324,7 @@ struct llm_build_deepseek2 : public llm_graph_context {
                 }
 
                 // split into {n_embd_head_qk_nope, n_head, n_tokens}
+                // Q 向量拆分
                 ggml_tensor * q_nope = ggml_view_3d(ctx0, q,
                         n_embd_head_qk_nope, n_head, n_tokens,
                         ggml_row_size(q->type, n_embd_head_k),
@@ -10427,12 +10439,14 @@ struct llm_build_deepseek2 : public llm_graph_context {
                     cb(Kcur, "Kcur", il);
 
                     // note: MLA without the absorption optimization converts into MHA (ie: GQA with full n_head groups)
+                    // 调用注意力计算函数。注释提到，没有吸收优化的 MLA 会转换为 MHA (Multi-Head Attention)。这里没有使用 wv_b
                     cur = build_attn(inp_attn, gf,
                             model.layers[il].wo, NULL,
                             Qcur, Kcur, Vcur, nullptr, nullptr, kq_scale, il);
                 }
             }
 
+            // 如果是最后一层，则只计算需要的输出 token 的结果，以节省计算。
             if (il == n_layer - 1) {
                 // skip computing output for unused tokens
                 ggml_tensor * inp_out_ids = build_inp_out_ids();
@@ -10440,15 +10454,18 @@ struct llm_build_deepseek2 : public llm_graph_context {
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
 
+            // 残差连接，作为FFN的输入
             ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
             cb(ffn_inp, "ffn_inp", il);
 
+            // FFN 前置归一化
             cur = build_norm(ffn_inp,
                     model.layers[il].ffn_norm, NULL,
                     LLM_NORM_RMS, il);
             cb(cur, "ffn_norm", il);
 
             if ((uint32_t) il < hparams.n_layer_dense_lead) {
+                // 前三层密集层
                 cur = build_ffn(cur,
                         model.layers[il].ffn_up,   NULL, NULL,
                         model.layers[il].ffn_gate, NULL, NULL,
@@ -10458,6 +10475,7 @@ struct llm_build_deepseek2 : public llm_graph_context {
                 cb(cur, "ffn_out", il);
             } else {
                 // MoE branch
+                // MoE 层
                 ggml_tensor * moe_out =
                     build_moe_ffn(cur,
                             model.layers[il].ffn_gate_inp,
@@ -10482,35 +10500,45 @@ struct llm_build_deepseek2 : public llm_graph_context {
                             LLM_FFN_SILU, LLM_FFN_PAR, il);
                     cb(ffn_shexp, "ffn_shexp", il);
 
+                    // 将 MoE 的输出和共享专家的输出相加
                     cur = ggml_add(ctx0, moe_out, ffn_shexp);
                     cb(cur, "ffn_out", il);
                 }
             }
 
+            // 残差连接
             cur = ggml_add(ctx0, cur, ffn_inp);
 
             cur = build_cvec(cur, il);
             cb(cur, "l_out", il);
 
             // input for next layer
+            // 当前层的输出 cur 成为下一层的输入 inpL
             inpL = cur;
-        }
+        } // end of for loop
 
+        // 现在是最后一层的输出
         cur = inpL;
 
+        // 最终归一化
         cur = build_norm(cur,
                 model.output_norm, NULL,
                 LLM_NORM_RMS, -1);
 
         cb(cur, "result_norm", -1);
+
+        // 将最终的 token 嵌入（经过所有层处理后）存储到结果 res 中
         res->t_embd = cur;
 
         // lm_head
+        // 将最终的嵌入与输出权重矩阵 model.output 相乘，得到 logits
         cur = ggml_mul_mat(ctx0, model.output, cur);
 
         cb(cur, "result_output", -1);
+        // 将 logits 存储到结果 res 中
         res->t_logits = cur;
 
+        // 扩展并构建计算图 gf 的前向传播路径，以 cur (logits) 为最终节点
         ggml_build_forward_expand(gf, cur);
     }
 };
@@ -13004,12 +13032,14 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
             } break;
         default:
             {
+                // 根据 flashattn 是否启用进行填充
                 const auto padding = llama_kv_cache_unified::get_padding(cparams);
 
                 cparams.n_ctx = GGML_PAD(cparams.n_ctx, padding);
 
                 LLAMA_LOG_DEBUG("%s: n_ctx = %u (padded)\n", __func__, cparams.n_ctx);
 
+                // 创建 kv cache
                 res = new llama_kv_cache_unified(
                         *this,
                         params.type_k,

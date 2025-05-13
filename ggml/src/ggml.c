@@ -2757,6 +2757,7 @@ void ggml_mul_mat_set_prec(
 
     c ~= as[:,:,i] @ b[:,i%r,t], i = ids[e,t] for all e,t in ids
 */
+// moe 稀疏计算核心
 struct ggml_tensor * ggml_mul_mat_id(
         struct ggml_context * ctx,
         struct ggml_tensor  * as,
@@ -5773,6 +5774,8 @@ static void ggml_visit_parents(struct ggml_cgraph * cgraph, struct ggml_tensor *
     }
 }
 
+// 从某个张量 tensor 出发，递归访问其依赖的所有父节点（source tensors），
+// 并把它们按拓扑排序加入到 ggml_cgraph 中，形成一个完整的前向计算图
 static void ggml_build_forward_impl(struct ggml_cgraph * cgraph, struct ggml_tensor * tensor, bool expand) {
     if (!expand) {
         // TODO: this branch isn't accessible anymore, maybe move this to ggml_build_forward_expand

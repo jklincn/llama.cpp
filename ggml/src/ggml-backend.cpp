@@ -1453,23 +1453,27 @@ ggml_backend_sched_t ggml_backend_sched_new(
         int n_backends,
         size_t graph_size,
         bool parallel) {
-    GGML_ASSERT(n_backends > 0);
-    GGML_ASSERT(n_backends <= GGML_SCHED_MAX_BACKENDS);
+    GGML_ASSERT(n_backends > 0);  // 确保至少有一个后端设备
+    GGML_ASSERT(n_backends <= GGML_SCHED_MAX_BACKENDS); // 确保后端数量不超过最大限制
+    // 确保最后一个后端是 CPU 类型
     GGML_ASSERT(ggml_backend_dev_type(ggml_backend_get_device(backends[n_backends - 1])) == GGML_BACKEND_DEVICE_TYPE_CPU);
 
+    // 初始化结构体
     struct ggml_backend_sched * sched = (ggml_backend_sched *) calloc(1, sizeof(struct ggml_backend_sched));
 
     const char * GGML_SCHED_DEBUG = getenv("GGML_SCHED_DEBUG");
     sched->debug = GGML_SCHED_DEBUG ? atoi(GGML_SCHED_DEBUG) : 0;
-    sched->n_backends = n_backends;
-    sched->n_copies = parallel ? GGML_SCHED_MAX_COPIES : 1;
+    sched->n_backends = n_backends; // 记录后端设备数量
+    sched->n_copies = parallel ? GGML_SCHED_MAX_COPIES : 1; // 如果启用流水线并行，则 n_copies 为最大副本数；否则为 1
 
     // initialize hash table
     // FIXME: needs to be size*2 to account for leafs (do it in graph_split instead)
+    // 根据计算图的大小初始化一个哈希表，用于存储图中节点的映射信息
     sched->hash_set    = ggml_hash_set_new(graph_size);
     sched->hv_tensor_backend_ids = (int *) malloc(sched->hash_set.size * sizeof(sched->hv_tensor_backend_ids[0]));
     sched->hv_tensor_copies      = (ggml_tensor **) malloc(sched->hash_set.size * sched->n_backends * sched->n_copies * sizeof(struct ggml_tensor *));
 
+    // 调度器为计算图中的每个节点分配内存空间，主要存储节点计算后端设备的 ID，以及每个节点的叶节点信息。
     const size_t ggml_sched_max_splits = graph_size; // at most there is one split for each node in the graph
     const size_t nodes_size = graph_size + ggml_sched_max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2;
     sched->node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->node_backend_ids[0]));
@@ -1477,13 +1481,16 @@ ggml_backend_sched_t ggml_backend_sched_new(
     sched->prev_node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->prev_node_backend_ids[0]));
     sched->prev_leaf_backend_ids = (int *) calloc(nodes_size, sizeof(sched->prev_leaf_backend_ids[0]));
 
+    // 计算了调度器上下文缓冲区的大小，并为其分配内存。这个缓冲区用于存储计算图的上下文信息。
     sched->context_buffer_size = ggml_sched_max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2*sizeof(struct ggml_tensor) + ggml_graph_overhead_custom(graph_size, false);
     sched->context_buffer = (char *) malloc(sched->context_buffer_size);
 
+    // 存储计算图分割的信息。如果计算图较大，可能需要对其进行分割（例如分层计算）。
     const int initial_splits_capacity = 16;
     sched->splits = (ggml_backend_sched_split *) calloc(initial_splits_capacity, sizeof(sched->splits[0]));
     sched->splits_capacity = initial_splits_capacity;
 
+    // 对于每个后端设备，设置其对应的缓冲区类型（buft）。如果没有指定缓冲区类型，则使用默认类型。
     for (int b = 0; b < n_backends; b++) {
         sched->backends[b] = backends[b];
         sched->bufts[b] = bufts ? bufts[b] : ggml_backend_get_default_buffer_type(backends[b]);
@@ -1496,8 +1503,10 @@ ggml_backend_sched_t ggml_backend_sched_new(
         }
     }
 
+    // 创建一个新的计算图内存分配器，它将负责管理在不同后端设备上分配的内存
     sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
 
+    // 重置调度器状态
     ggml_backend_sched_reset(sched);
 
     return sched;

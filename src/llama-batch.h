@@ -7,32 +7,38 @@
 
 // very similar to llama_batch,
 // but has more metadata about sequences
+// 微批 (micro‑batch)
+// 扁平化后的输入 slice，所有数组严格按 token 展开，让后端无需再解析变长序列
 struct llama_ubatch {
+    // 若 true 表示 batch 里所有序列 token 数相同；
+    // 这样可以走更高效的等长路径(equal‑length kernel / kv‑layout)。
     bool equal_seqs;
     // TODO: whole_seqs for embeddings?
 
-    uint32_t n_tokens; // total tokens (n_seq_tokens * n_seqs)
-    uint32_t n_seq_tokens; // tokens per sequence
-    uint32_t n_seqs;
+    uint32_t n_tokens; // total tokens (n_seq_tokens * n_seqs) 全批 token 总数 = n_seq_tokens * n_seqs
+    uint32_t n_seq_tokens; // tokens per sequence 每条序列平均token数量
+    uint32_t n_seqs; // 序列条数
 
-    llama_token  *  token;    // [n_tokens]
-    float        *  embd;     // [n_embd, n_tokens]
-    llama_pos    *  pos;      // [n_tokens]
-    int32_t      *  n_seq_id; // [n_seqs]
-    llama_seq_id ** seq_id;   // [n_seqs]
+    llama_token  *  token;    // [n_tokens] 指向 token ID 数组，长度 = n_tokens
+    float        *  embd;     // [n_embd, n_tokens] 可选：直接给定 embedding
+    llama_pos    *  pos;      // [n_tokens] 每 token 的 当前位置
+    int32_t      *  n_seq_id; // [n_seqs] 每条序列包含多少个 sequence‑id，通常为 1
+    llama_seq_id ** seq_id;   // [n_seqs] 二维指针：seq_id[s] 指向长度 n_seq_id[s] 的 id 列表
     int8_t       *  output;   // [n_tokens]
 };
 
+// 描述 1 条序列在 sbatch 中的位置
 struct llama_sbatch_seq {
-    int32_t n_seq_id;
+    int32_t n_seq_id;  // 该序列有几个 id（见上）
 
-    llama_seq_id * seq_id;
+    llama_seq_id * seq_id;  // 指向具体 id 列表
 
-    size_t offset;
-    size_t length;
+    size_t offset;  // 在整体输入 token 流里的起始索引
+    size_t length;  // 本 slice 包含的 token 数
 };
 
 // sequence-length-aware batch splitting
+// 把原始 llama_batch 做了 排序和索引，随后可以调用 split_*() 生成一个个 llama_ubatch
 struct llama_sbatch {
     // tokens left in this batch
     size_t n_tokens;

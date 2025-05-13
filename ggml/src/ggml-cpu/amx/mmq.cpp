@@ -37,6 +37,7 @@
 namespace {
 
 // Forced unrolling
+// 强制展开 for 循环 —— 生成无分支、高 ILP 的 tile 代码
 template <int n>
 struct Unroll {
     template <typename Func, typename... Args>
@@ -95,6 +96,8 @@ struct is_type_qkk : std::integral_constant<bool,
         }                                                                              \
     }()
 
+// 根据 ggml_type 选定量化块结构（block_q4_0, block_q8_K …），并把
+// blck_size（一个 block 对应多少 原始 K 数）设成 QK4_0 / QK_K 等常量
 #define GGML_DISPATCH_QTYPES(QT, ...)                                                  \
     [&] {                                                                              \
         switch (QT) {                                                                  \
@@ -201,6 +204,9 @@ struct tile_config_t{
 //    advanced-matrix-extensions-intrinsics-functions.html
 //
 
+// 每线程第一次进 AMX kernel 时调用
+// 配置 palette‑1，把 8 个 tmm 寄存器映射成
+// A(16×32), B(8×64), C(16×16) “2‑2‑4” 布局（见源码注释）
 #define TC_CONFIG_TILE(i, r, cb) tc.rows[i] = r; tc.colsb[i] = cb
 void ggml_tile_config_init(void) {
     static thread_local bool is_first_time = true;
@@ -2024,6 +2030,8 @@ struct tinygemm_kernel_vnni<block_q8_K, block_iq4_xs, float, BLOCK_M, BLOCK_N, B
         (const char *)src0->data + PACKED_INDEX(nb * kTilesN, 0, KB, TILE_SIZE),     \
         (float *) dst->data + 0 * N + nb_start, ldc)
 
+// 真正使用 AMX _tile_dpbssd 的 INT8 kernel；
+// 双缓冲 Tile C（C_pre/C_cur）以 hide latency
 template <typename TA, typename TB, typename TC, int BLOCK_K,
           typename std::enable_if<!is_type_qkk<TB>::value, int>::type = 0>
 void tinygemm_kernel_amx(int M, int N, int KB, const void * RESTRICT _A, const void * RESTRICT _B, TC * RESTRICT C, int ldc) {
@@ -2322,6 +2330,7 @@ size_t ggml_backend_amx_get_alloc_size(const struct ggml_tensor * tensor) {
 }
 
 // pack weight to vnni format
+// 按 TILE_M × TILE_N × TILE_K 规则把 (out_features, in_features) 列主序权重重排成 VNNI (row‑interleave 4) + K 维 32/64‑B padding，存入 AMX‑专用 buffer。
 void ggml_backend_amx_convert_weight(struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     GGML_ASSERT(offset == 0 && size == ggml_nbytes(tensor)); // only full tensor conversion is supported for now
 

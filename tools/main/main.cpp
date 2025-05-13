@@ -579,15 +579,18 @@ int main(int argc, char ** argv) {
     }
 
     // 主循环
+    // 条件：当还有待生成的 token 并且未检测到反向提示时，或当前是交互模式
     while ((n_remain != 0 && !is_antiprompt) || params.interactive) {
         // predict
         if (!embd.empty()) {
+            // 当embd不为空时（有待处理的token）
             // ... 处理当前输入的 token
             // Note: (n_ctx - 4) here is to match the logic for commandline prompt handling via
             // --prompt or --file which uses the same value.
             int max_embd_size = n_ctx - 4;
 
             // Ensure the input doesn't exceed the context size by truncating embd if necessary.
+            // 确保输入不超过模型上下文窗口，否则截断并警告。
             if ((int) embd.size() > max_embd_size) {
                 const int skipped_tokens = (int) embd.size() - max_embd_size;
                 embd.resize(max_embd_size);
@@ -603,7 +606,7 @@ int main(int argc, char ** argv) {
                 // - take the n_keep first tokens from the original prompt (via n_past)
                 // - take half of the last (n_ctx - n_keep) tokens and recompute the logits in batches
 
-                // 上下文管理
+                // 上下文移位（Context Shifting）
                 if (n_past + (int) embd.size() >= n_ctx) {
                     if (!params.ctx_shift){
                         LOG_DBG("\n\n%s: context full and context shift is disabled => stopping\n", __func__);
@@ -615,12 +618,14 @@ int main(int argc, char ** argv) {
                         break;
                     }
 
+                    // 移除老token，保留重要token
                     const int n_left    = n_past - params.n_keep;
                     const int n_discard = n_left/2;
 
                     LOG_DBG("context full, swapping: n_past = %d, n_left = %d, n_ctx = %d, n_keep = %d, n_discard = %d\n",
                             n_past, n_left, n_ctx, params.n_keep, n_discard);
 
+                    // 移除和重新排列KV缓存
                     llama_kv_self_seq_rm (ctx, 0, params.n_keep            , params.n_keep + n_discard);
                     llama_kv_self_seq_add(ctx, 0, params.n_keep + n_discard, n_past, -n_discard);
 
@@ -635,6 +640,7 @@ int main(int argc, char ** argv) {
                 }
             } else {
                 // context extension via Self-Extend
+                // 自扩展：更高级的上下文扩展方法，通过重组和分组KV缓存实现
                 while (n_past >= ga_i + ga_w) {
                     const int ib = (ga_n*ga_i)/ga_w;
                     const int bd = (ga_w/ga_n)*(ga_n - 1);
@@ -658,6 +664,7 @@ int main(int argc, char ** argv) {
             }
 
             // try to reuse a matching prefix from the loaded session instead of re-eval (via n_past)
+            // 通过重用已缓存的会话token，避免重新计算，提高效率。
             if (n_session_consumed < (int) session_tokens.size()) {
                 size_t i = 0;
                 for ( ; i < embd.size(); i++) {
@@ -687,6 +694,7 @@ int main(int argc, char ** argv) {
 
                 LOG_DBG("eval: %s\n", string_from(ctx, embd).c_str());
 
+                // 将token分批送入模型进行解码，提高性能
                 if (llama_decode(ctx, llama_batch_get_one(&embd[i], n_eval))) {
                     LOG_ERR("%s : failed to eval\n", __func__);
                     return 1;
@@ -712,6 +720,7 @@ int main(int argc, char ** argv) {
         // 所有 prompt token 已送达 且 非交互态
         if ((int) embd_inp.size() <= n_consumed && !is_interacting) {
             // optionally save the session on first sample (for faster prompt loading next time)
+            // 可选地保存会话
             if (!path_session.empty() && need_to_save_session && !params.prompt_cache_ro) {
                 need_to_save_session = false;
                 llama_state_save_file(ctx, path_session.c_str(), session_tokens.data(), session_tokens.size());
@@ -736,7 +745,7 @@ int main(int argc, char ** argv) {
             LOG_DBG("n_remain: %d\n", n_remain);
         } else {
             // some user input remains from prompt or interaction, forward it to processing
-            // 把剩余 prompt/in‑flight 用户输入送入 embd
+            /// 将剩余用户输入送入处理队列
             LOG_DBG("embd_inp.size(): %d, n_consumed: %d\n", (int) embd_inp.size(), n_consumed);
             while ((int) embd_inp.size() > n_consumed) {
                 embd.push_back(embd_inp[n_consumed]);
@@ -753,6 +762,7 @@ int main(int argc, char ** argv) {
         }
 
         // display text
+        // 输出生成的token
         if (input_echo && display) {
             // 打印到控制台
             for (auto id : embd) {
@@ -761,6 +771,7 @@ int main(int argc, char ** argv) {
                 // Console/Stream Output
                 LOG("%s", token_str.c_str());
 
+                // 记录token到相应的log...
                 // Record Displayed Tokens To Log
                 // Note: Generated tokens are created one by one hence this check
                 if (embd.size() > 1) {
@@ -781,6 +792,7 @@ int main(int argc, char ** argv) {
         }
 
         // if not currently processing queued inputs;
+        // 检测反向提示
         if ((int) embd_inp.size() <= n_consumed) {
             // check for reverse prompt in the last n_prev tokens
             if (!params.antiprompt.empty()) {
@@ -791,16 +803,18 @@ int main(int argc, char ** argv) {
                 // Check if each of the reverse prompts appears at the end of the output.
                 // If we're not running interactively, the reverse prompt might be tokenized with some following characters
                 // so we'll compensate for that by widening the search window a bit.
+                // 在最近输出中查找反向提示...
                 for (std::string & antiprompt : params.antiprompt) {
                     size_t extra_padding = params.interactive ? 0 : 2;
                     size_t search_start_pos = last_output.length() > static_cast<size_t>(antiprompt.length() + extra_padding)
                         ? last_output.length() - static_cast<size_t>(antiprompt.length() + extra_padding)
                         : 0;
-
+                    // 搜索并检查...
                     if (last_output.find(antiprompt, search_start_pos) != std::string::npos) {
                         if (params.interactive) {
                             is_interacting = true;
                         }
+                        // 找到反向提示...
                         is_antiprompt = true;
                         break;
                     }
@@ -824,6 +838,7 @@ int main(int argc, char ** argv) {
             }
 
             // deal with end of generation tokens in interactive mode
+            // 处理生成结束标记
             if (!waiting_for_first_input && llama_vocab_is_eog(vocab, common_sampler_last(smpl))) {
                 LOG_DBG("found an EOG token\n");
 

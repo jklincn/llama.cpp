@@ -583,6 +583,7 @@ int64_t llm_graph_context::n_pos_per_embd() const {
 }
 
 void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
+    // cb_func 见 graph_get_cb
     if (cb_func) {
         cb_func(ubatch, cur, name, il);
     }
@@ -597,8 +598,11 @@ ggml_tensor * llm_graph_context::build_cvec(
 ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * w,
           ggml_tensor * cur) const {
+    // gate(x)
     ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
 
+    // 遍历所有已加载的 LoRA 适配器
+    // *loras = (const llama_adapter_loras) size=0 {}
     for (const auto & lora : *loras) {
         llama_adapter_lora_weight * lw = lora.first->get_weight(w);
         if (lw == nullptr) {
@@ -620,6 +624,7 @@ ggml_tensor * llm_graph_context::build_lora_mm(
     return res;
 }
 
+// 基于索引的矩阵乘法：从 w 中根据 ids 选择行/块，然后与 cur 进行矩阵乘法
 ggml_tensor * llm_graph_context::build_lora_mm_id(
           ggml_tensor * w,   // ggml_tensor * as
           ggml_tensor * cur, // ggml_tensor * b
@@ -826,13 +831,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
                float   w_scale,
          llama_expert_gating_func_type gating_op,
                  int   il) const {
+    // 从输入张量 cur 获取嵌入维度 n_embd 和 Token 数量 n_tokens
     const int64_t n_embd   = cur->ne[0];
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
 
+    // logits = gate(x)
     ggml_tensor * logits = build_lora_mm(gate_inp, cur); // [n_expert, n_tokens]
     cb(logits, "ffn_moe_logits", il);
 
+    // 计算分数
+    // scores = sigmoid(logits)
     ggml_tensor * probs = nullptr;
     switch (gating_op) {
         case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX:
@@ -850,6 +859,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     // add experts selection bias - introduced in DeepSeek V3
     // leave probs unbiased as it's later used to get expert weights
+    // 专家选择偏置，DeepSeek V3 引入，最终得到 selection_probs
     ggml_tensor * selection_probs = probs;
     if (exp_probs_b != nullptr) {
         selection_probs = ggml_add(ctx0, probs, exp_probs_b);
@@ -863,14 +873,18 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     // select experts
+    // Top-K 专家选择
+    // selected_experts = top_k(scores)
     ggml_tensor * selected_experts = ggml_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
     cb(selected_experts->src[0], "ffn_moe_argsort", il);
     cb(selected_experts, "ffn_moe_topk", il);
 
+    // 提取专家权重
     ggml_tensor * weights = ggml_get_rows(ctx0,
             ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens), selected_experts); // [1, n_expert_used, n_tokens]
     cb(weights, "ffn_moe_weights", il);
 
+    // 归一化(可选):
     if (norm_w) {
         weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
 
@@ -882,6 +896,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
         weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
     }
+    // 缩放权重(可选):
     if (scale_w) {
         weights = ggml_scale(ctx0, weights, w_scale);
         cb(weights, "ffn_moe_weights_scaled", il);
@@ -897,10 +912,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(cur, "ffn_moe_weighted", il);
     }
 
+    // 开始计算 down_proj(silu(gate_proj(x)) * up_proj(x))
+
+    // up_proj(x)
     ggml_tensor * up = build_lora_mm_id(up_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
     cb(up, "ffn_moe_up", il);
 
     ggml_tensor * experts = nullptr;
+
+    // gate_proj(x)
     if (gate_exps) {
         cur = build_lora_mm_id(gate_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
         cb(cur, "ffn_moe_gate", il);
@@ -908,6 +928,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cur = up;
     }
 
+    // silu(gate_proj(x))
     switch (type_op) {
         case LLM_FFN_SILU:
             {
@@ -923,25 +944,32 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
+    // silu(gate_proj(x)) * up_proj(x)
     if (gate_exps) {
         cur = ggml_mul(ctx0, cur, up); // [n_ff, n_expert_used, n_tokens]
         cb(cur, "ffn_moe_gate_par", il);
     }
 
+    // experts = down_proj(silu(gate_proj(x)) * up_proj(x))
     experts = build_lora_mm_id(down_exps, cur, selected_experts); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 
+    // experts * weights
     if (!weight_before_ffn) {
         experts = ggml_mul(ctx0, experts, weights);
         cb(cur, "ffn_moe_weighted", il);
     }
 
     // aggregate experts
+    // 循环 n_expert_used 次
+    // 在每次循环中，使用 ggml_view_2d 获取 experts 张量中第 i 个被选专家（对于所有 token）的最终输出的一个视图
     ggml_tensor * moe_out = nullptr;
     for (int i = 0; i < n_expert_used; ++i) {
         ggml_tensor * cur_expert = ggml_view_2d(ctx0, experts, n_embd, n_tokens,
                 experts->nb[2], i*experts->nb[1]);
 
+        // 将这些视图累加到 moe_out 中
+        // 这就把每个 token 的被选专家（加权后的）结果组合起来了。
         if (i == 0) {
             moe_out = cur_expert;
         } else {

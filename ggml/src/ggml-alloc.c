@@ -342,43 +342,47 @@ static size_t ggml_dyn_tallocr_max_size(struct ggml_dyn_tallocr * alloc) {
 
 // graph allocator
 
+// 一个节点在计算图中的元数据
 struct hash_node {
-    int n_children;
-    int n_views;
-    int buffer_id;
-    size_t offset; // offset within the buffer
-    bool allocated;
+    int n_children;  // 子节点数量
+    int n_views;     // 视图数量
+    int buffer_id;   // 该节点使用的缓存区的 ID
+    size_t offset;   // 缓存区内的偏移量
+    bool allocated;  // 是否已经分配内存
 };
 
+// 管理张量的内存分配信息
 struct tensor_alloc {
-    int buffer_id;
-    size_t offset;
-    size_t size_max; // 0 = pre-allocated, unused, or view
+    int buffer_id;  // 缓存区 ID
+    size_t offset;  // 缓存区内的偏移量
+    size_t size_max; // 最大分配内存大小，0 表示已预分配或不使用或是一个视图
 };
 
+// 表示一个叶节点的内存分配信息。在计算图中，叶节点通常是输入节点或者没有子节点的节点。
 struct leaf_alloc {
     struct tensor_alloc leaf;
 };
 
+// 表示一个普通节点的内存分配信息。节点可以有多个输入（子节点），并且可能会有多个输出（叶节点）。
 struct node_alloc {
-    struct tensor_alloc dst;
-    struct tensor_alloc src[GGML_MAX_SRC];
+    struct tensor_alloc dst;  // 目标张量（输出）
+    struct tensor_alloc src[GGML_MAX_SRC];  // 源张量（输入）
 };
 
 struct ggml_gallocr {
-    ggml_backend_buffer_type_t * bufts; // [n_buffers]
-    ggml_backend_buffer_t * buffers; // [n_buffers]
-    struct ggml_dyn_tallocr ** buf_tallocs; // [n_buffers]
-    int n_buffers;
+    ggml_backend_buffer_type_t * bufts; // [n_buffers] 后端缓冲区类型数组
+    ggml_backend_buffer_t * buffers; // [n_buffers] 后端缓冲区数组
+    struct ggml_dyn_tallocr ** buf_tallocs; // [n_buffers] 每个缓冲区的动态分配器
+    int n_buffers;  // 缓冲区数量
 
-    struct ggml_hash_set hash_set;
-    struct hash_node * hash_values; // [hash_set.size]
+    struct ggml_hash_set hash_set;  // 哈希表，用于存储张量的哈希值
+    struct hash_node * hash_values; // [hash_set.size] 哈希表中存储的 hash_node 数组
 
-    struct node_alloc * node_allocs; // [n_nodes]
-    int n_nodes;
+    struct node_alloc * node_allocs; // [n_nodes] 节点的内存分配信息数组
+    int n_nodes; // 节点数量
 
-    struct leaf_alloc * leaf_allocs; // [n_leafs]
-    int n_leafs;
+    struct leaf_alloc * leaf_allocs; // [n_leafs] 叶节点的内存分配信息数组
+    int n_leafs; // 叶节点数量
 };
 
 ggml_gallocr_t ggml_gallocr_new_n(ggml_backend_buffer_type_t * bufts, int n_bufs) {

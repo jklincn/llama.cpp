@@ -19,13 +19,17 @@
 #if defined(__AMX_INT8__) && defined(__AVX512VNNI__)
 
 // AMX type_trais
+// Tensor traits —— 把 AMX 能力挂接进 GGML
 namespace ggml::cpu::amx {
 class tensor_traits : public ggml::cpu::tensor_traits {
+    // 告诉调度器执行该 op 时需要临时工作区大小（AMX GEMM 常用 TILE_K * TILE_N 的 tile buffer
     bool work_size(int /* n_threads */, const struct ggml_tensor * op, size_t & size) override {
         size = ggml_backend_amx_desired_wsize(op);
         return true;
     }
 
+    // 当 op 是矩阵乘 (GGML_OP_MUL_MAT) 时改走 ggml_backend_amx_mul_mat()，也就是 hand‑written AMX 内核。
+    // 否则返回 false 让默认 CPU path 处理。
     bool compute_forward(struct ggml_compute_params * params, struct ggml_tensor * op) override {
         if (op->op == GGML_OP_MUL_MAT) {
             ggml_backend_amx_mul_mat(params, op);
@@ -35,6 +39,7 @@ class tensor_traits : public ggml::cpu::tensor_traits {
     }
 };
 
+// 返回单例
 static ggml::cpu::tensor_traits * get_tensor_traits(ggml_backend_buffer_t, struct ggml_tensor *) {
     static tensor_traits traits;
     return &traits;
@@ -42,6 +47,8 @@ static ggml::cpu::tensor_traits * get_tensor_traits(ggml_backend_buffer_t, struc
 }  // namespace ggml::cpu::amx
 
 // AMX buffer interface
+// Backend‑buffer 实现：把权重缓冲区搬到 AMX‑friendly 布局
+// GGML 每个后端要实现一套 buffer 接口 来告诉框架如何分配/读写/拷贝内存。
 static void ggml_backend_amx_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     free(buffer->context);
 }
@@ -66,10 +73,12 @@ static void ggml_backend_amx_buffer_memset_tensor(ggml_backend_buffer_t buffer, 
 
 static void ggml_backend_amx_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor,
                                                const void * data, size_t offset, size_t size) {
+    // 如果张量是支持 AMX 的量化类型，则调用 convert_weight
     if (qtype_has_amx_kernels(tensor->type)) {
         GGML_LOG_DEBUG("%s: amx repack tensor %s of type %s\n", __func__, tensor->name, ggml_type_name(tensor->type));
         ggml_backend_amx_convert_weight(tensor, data, offset, size);
     } else {
+        // 普通类型（F16/F32 之类）仍原样 memcpy
         memcpy((char *) tensor->data + offset, data, size);
     }
 
@@ -140,12 +149,21 @@ static size_t ggml_backend_amx_buffer_type_get_alignment(ggml_backend_buffer_typ
 
 namespace ggml::cpu::amx {
 class extra_buffer_type : ggml::cpu::extra_buffer_type {
+    // 判断某个 op 是否能跑在 AMX
     bool supports_op(ggml_backend_dev_t, const struct ggml_tensor * op) override {
         // handle only 2d gemm for now
+        // 只接管 2‑D GEMM
         auto is_contiguous_2d = [](const struct ggml_tensor * t) {
             return ggml_is_contiguous(t) && t->ne[3] == 1 && t->ne[2] == 1;
         };
 
+        // 权重张量 (src0) 必须
+        // - 存在 buffer 且 buffer 类型就是 AMX buffer
+        // - out_features (op->ne[0]) 是 TILE_N*2 = 32 的倍数
+        // - 权重类型要么是 支持 AMX 的量化，要么是 F16
+        // 激活张量 (src1) 必须
+        // - 在 host buffer（CPU 内存）或直接 nullptr（即时计算）
+        // - 必须是 F32 类型——AMX kernel 里常把 activations 转成累加 int32 或 F32 后再还原。
         if (op->op == GGML_OP_MUL_MAT && is_contiguous_2d(op->src[0]) &&  // src0 must be contiguous
             is_contiguous_2d(op->src[1]) &&                               // src1 must be contiguous
             op->src[0]->buffer && op->src[0]->buffer->buft == ggml_backend_amx_buffer_type() &&
@@ -185,12 +203,15 @@ static size_t ggml_backend_amx_buffer_type_get_alloc_size(ggml_backend_buffer_ty
 #define XFEATURE_XTILECFG       17
 #define XFEATURE_XTILEDATA      18
 
+// 向操作系统申请 “tile data” 权限
+// 若失败（内核或 BIOS 未开启 AMX），整个 AMX backend 会返回 nullptr，GGML 随后会回退到普通 CPU 后端。
 static bool ggml_amx_init() {
 #if defined(__gnu_linux__)
     if (syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)) {
         fprintf(stderr, "AMX is not ready to be used!\n");
         return false;
     }
+    GGML_LOG_INFO("AMX is ready to be used!\n");
     return true;
 #elif defined(_WIN32)
     return true;

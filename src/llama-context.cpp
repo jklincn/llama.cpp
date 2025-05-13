@@ -204,10 +204,12 @@ llama_context::llama_context(
 
         for (auto & backend : backends) {
             // 对每个后端取默认的缓冲区类型
+            // CPU 后端是 ggml_backend_cpu_buffer_type
+            // GPU 后端是 ggml_backend_cuda_buffer_type
             auto * buft = ggml_backend_get_default_buffer_type(backend.get());
             auto backend_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
 
-            // CPU backend 若有 GPU，则优先用第一块 GPU 的 host buffer 加速传输
+            // 对于 CPU 后端，如果系统有 GPU，则优先用第一块 GPU 的 host buffer 来加速中间状态的传输
             if (backend_type == GGML_BACKEND_DEVICE_TYPE_CPU && !model.devices.empty()) {
                 // use the host buffer of the first device CPU for faster transfer of the intermediate state
                 auto * dev = model.devices[0];
@@ -223,17 +225,24 @@ llama_context::llama_context(
 
         LLAMA_LOG_DEBUG("%s: backend_ptrs.size() = %zu\n", __func__, backend_ptrs.size());
 
-        // 推断最大 graph 节点数，用它准备 buf_compute_meta
+        // 推断最大 graph 节点数
         const size_t max_nodes = this->graph_max_nodes();
 
         LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
 
         // buffer used to store the computation graph and the tensor meta data
+        // 预分配计算图的元数据缓冲区
+        // ggml_tensor_overhead 返回每个张量结构体的开销
+        // ggml_graph_overhead_custom 返回计算图的开销
         buf_compute_meta.resize(ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false));
 
         // TODO: move these checks to ggml_backend_sched
         // enabling pipeline parallelism in the scheduler increases memory usage, so it is only done when necessary
-        // 是否启用pipeline‑parallel需满足 多GPU+按层切分+offload KQV+无tensor override 条件
+        // 启用 pipeline‑parallel 需满足以下条件
+        // - 多 GPU
+        // - 按层切分
+        // - offload KQV
+        // - 无tensor override 
         bool pipeline_parallel =
             model.n_devices() > 1 &&
             model.params.n_gpu_layers > (int) model.hparams.n_layer &&
@@ -241,8 +250,8 @@ llama_context::llama_context(
             cparams.offload_kqv &&
             !model.has_tensor_overrides();
 
-        // pipeline parallelism requires support for async compute and events in all devices‘
-        // 是否启用 pipeline‑parallel 需所有 GPU 支持 async + events
+        // pipeline parallelism requires support for async compute and events in all devices
+        // 启用 pipeline‑parallel 还需要所有 GPU 支持异步计算（async compute）和事件（events）
         if (pipeline_parallel) {
             for (auto & backend : backends) {
                 auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
@@ -270,7 +279,9 @@ llama_context::llama_context(
     }
 
     // reserve worst-case graph
-    // 预留最坏情况下的计算图和缓冲
+    // 预留最坏情况下的计算图和缓冲，保证推理阶段不会再出现 realloc 或 graph‑rebuild
+    // 用最坏参数把计算图先构出来，让 ggml 后端把所有 buffer 一次性申请好
+    // 先按最大 batch + 满 KV做一次冷启动，后面所有图都会是同或更小尺寸，于是永远不会再触碰 malloc
     if (!hparams.vocab_only) {
         const uint32_t n_seqs = 1; // TODO: worst-case number of sequences
         const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
@@ -292,6 +303,7 @@ llama_context::llama_context(
         // simulate full KV cache
         llama_kv_cache * kv_self = static_cast<llama_kv_cache *>(memory.get());
 
+        // 最坏情况：KV cache 已满，后续图构建会把整个缓存都算进去。
         kv_self->set_full();
 
         cross.v_embd.clear();
@@ -306,6 +318,7 @@ llama_context::llama_context(
             LLAMA_LOG_DEBUG("%s: reserving graph for n_tokens = %d, n_seqs = %d\n", __func__, ubatch_pp.n_tokens, ubatch_pp.n_seqs);
 
             auto * gf = graph_init();
+            // 根据批大小 n_tokens 和模型结构生成一棵图
             graph_build(ctx_compute.get(), gf, ubatch_pp, LLM_GRAPH_TYPE_DEFAULT);
 
             if (!ggml_backend_sched_reserve(sched.get(), gf)) {
@@ -859,10 +872,12 @@ int llama_context::decode(llama_batch & inp_batch) {
         return -1;
     }
 
+    // 获取KV缓存的引用
     llama_kv_cache * kv_self = static_cast<llama_kv_cache *>(memory.get());
 
     // temporary allocate memory for the input batch if needed
     // TODO: this is incorrect for multiple sequences because get_pos_max() is the maximum across all sequences
+    // 这里处理批处理的位置信息，确保每个token被正确分配到KV缓存中的位置
     llama_batch_allocr batch_allocr(inp_batch, inp_batch.pos ? -1 : kv_self->get_pos_max() + 1);
 
     const llama_batch & batch = batch_allocr.batch;
@@ -877,6 +892,7 @@ int llama_context::decode(llama_batch & inp_batch) {
 
     llama_kv_cache_guard kv_guard(kv_self);
 
+    // 输入验证与分析
     GGML_ASSERT((!batch.token && batch.embd) || (batch.token && !batch.embd)); // NOLINT
 
     if (batch.token) {
@@ -905,6 +921,7 @@ int llama_context::decode(llama_batch & inp_batch) {
     int64_t n_outputs_all = 0;
 
     // count outputs
+    // 计算需要输出logits的token数量
     if (batch.logits && !embd_pooled) {
         for (uint32_t i = 0; i < n_tokens_all; ++i) {
             n_outputs_all += batch.logits[i] != 0;
@@ -916,6 +933,7 @@ int llama_context::decode(llama_batch & inp_batch) {
         n_outputs_all = 1;
     }
 
+    // KV缓存管理与批次分割
     llama_sbatch sbatch = kv_self->sbatch_init(batch, /* logits_all */ n_outputs_all == n_tokens_all);
 
     // reserve output buffer
@@ -929,7 +947,9 @@ int llama_context::decode(llama_batch & inp_batch) {
 
     int64_t n_outputs_prev = 0;
 
+    // 微批处理循环
     while (sbatch.n_tokens > 0) {
+        // 将sbatch分解为多个更小的微批次(ubatch)进行处理
         llama_ubatch ubatch = kv_self->ubatch_next(sbatch, cparams.n_ubatch, embd_pooled);
 
         // count the outputs in this u_batch
@@ -950,24 +970,31 @@ int llama_context::decode(llama_batch & inp_batch) {
         }
 
         // find KV slot
+        // 为微批次查找KV缓存槽位
         if (!kv_self->find_slot(ubatch)) {
             LLAMA_LOG_WARN("%s: failed to find KV cache slot for ubatch of size %d\n", __func__, ubatch.n_tokens);
 
             return 1;
         }
 
+        // 计算图构建与执行
         ggml_backend_sched_reset(sched.get());
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
+        // 初始化计算图
         auto * gf = graph_init();
+        // 根据ubatch构建解码器图
         auto res = graph_build(ctx_compute.get(), gf, ubatch, LLM_GRAPH_TYPE_DECODER);
 
         // LLAMA_LOG_INFO("graph build time: %.3f ms (%d nodes, %d leafs)\n", (ggml_time_us() - t_start_us)/1000.0, gf->n_nodes, gf->n_leafs);
 
+        // 分配计算资源
         ggml_backend_sched_alloc_graph(sched.get(), gf);
 
+        // 设置输入
         res->set_inputs(&ubatch);
 
+        // 执行计算
         const auto compute_status = graph_compute(gf, ubatch.n_tokens > 1);
         if (compute_status != GGML_STATUS_SUCCESS) {
             switch (compute_status) {
@@ -994,7 +1021,9 @@ int llama_context::decode(llama_batch & inp_batch) {
         }
 
         // extract logits
+        // 提取 logits
         if (t_logits && n_outputs > 0) {
+            // 从计算设备提取logits到主机内存
             ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched.get(), t_logits);
             GGML_ASSERT(backend_res != nullptr);
             GGML_ASSERT(logits != nullptr);
@@ -1009,10 +1038,12 @@ int llama_context::decode(llama_batch & inp_batch) {
         }
 
         // extract embeddings
+        // 提取嵌入向量
         if (t_embd && n_outputs > 0) {
             ggml_backend_t backend_embd = ggml_backend_sched_get_tensor_backend(sched.get(), t_embd);
             GGML_ASSERT(backend_embd != nullptr);
 
+            // ... 根据不同池化策略提取嵌入向量 ...
             switch (cparams.pooling_type) {
                 case LLAMA_POOLING_TYPE_NONE:
                     {
@@ -1067,6 +1098,7 @@ int llama_context::decode(llama_batch & inp_batch) {
     }
 
     // finalize the batch processing
+    // 提交KV缓存更新
     kv_guard.commit();
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
@@ -1074,6 +1106,7 @@ int llama_context::decode(llama_batch & inp_batch) {
 
     // set output mappings
     {
+        // 确保输出的顺序与用户提供的批次顺序一致。
         bool sorted_output = true;
 
         auto & out_ids = sbatch.out_ids;
@@ -1129,12 +1162,14 @@ int llama_context::decode(llama_batch & inp_batch) {
     //synchronize();
 
     // decide if we need to defrag the kv cache
+    // 根据碎片化阈值决定是否需要对KV缓存进行碎片整理
     if (cparams.defrag_thold > 0.0f) {
         kv_self->defrag_sched(cparams.defrag_thold);
     }
 
     // Reset state for the next token before backend sync, to allow the CPU activities in the reset to
     // overlap with device computation.
+    // 重置计算调度器，准备下一次计算
     ggml_backend_sched_reset(sched.get());
 
     return 0;
@@ -1230,6 +1265,7 @@ int32_t llama_context::output_reserve(int32_t n_outputs) {
 // graph
 //
 
+// 推断一个计算图节点的最大数量
 int32_t llama_context::graph_max_nodes() const {
     return std::max<int32_t>(65536, 5*model.n_tensors());
 }
@@ -1298,12 +1334,14 @@ ggml_status llama_context::graph_compute(
 
 llm_graph_cb llama_context::graph_get_cb() const {
     return [&](const llama_ubatch & ubatch, ggml_tensor * cur, const char * name, int il) {
+        // 为当前张量 cur 设置一个有意义的名称
         if (il >= 0) {
             ggml_format_name(cur, "%s-%d", name, il);
         } else {
             ggml_set_name(cur, name);
         }
 
+        // 如果不将 KQV 相关的计算卸载到加速器
         if (!cparams.offload_kqv) {
             if (strcmp(name, "kqv_merged_cont") == 0) {
                 // all nodes between the KV store and the attention output are run on the CPU
@@ -1313,13 +1351,22 @@ llm_graph_cb llama_context::graph_get_cb() const {
 
         // norm may be automatically assigned to the backend of the previous layer, increasing data transfer between backends
         // FIXME: fix in ggml_backend_sched
+        // 判断是否配置为完全卸载（GPU层数大于总层数，通常意味着所有层都在GPU上）
         const bool full_offload = model.params.n_gpu_layers > (int) model.hparams.n_layer;
+        // 在批处理大小 ubatch.n_tokens 小于32，或者启用了 full_offload 时触发
         if (ubatch.n_tokens < 32 || full_offload) {
+            // 检查这是否是一个层内的归一化操作
             if (il != -1 && strcmp(name, "norm") == 0) {
+                // 获取当前层 il 预期的设备/后端
                 const auto & dev_layer = model.dev_layer(il);
+                // 遍历所有可用的后端
                 for (const auto & backend : backends) {
+                    // 找到与该层预期设备匹配的后端
                     if (ggml_backend_get_device(backend.get()) == dev_layer) {
+                        // 检查这个匹配的后端是否支持当前归一化张量 cur 所需的操作
                         if (ggml_backend_supports_op(backend.get(), cur)) {
+                            // 如果都满足，则将该归一化张量的后端设置为其层预期的后端
+                            // 这可以避免不必要的数据在不同后端（如CPU和GPU）之间来回拷贝。
                             ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend.get());
                         }
                     }

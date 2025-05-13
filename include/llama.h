@@ -251,15 +251,16 @@ extern "C" {
     // - logits : if zero, the logits (and/or the embeddings) for the respective token will not be output
     //            (if set to NULL, only the logits for last token will be returned)
     //
+    // 所有数组长度都等于 n_tokens
     typedef struct llama_batch {
-        int32_t n_tokens;
+        int32_t n_tokens;  // 本批一共有多少 token
 
-        llama_token  *  token;
-        float        *  embd;
-        llama_pos    *  pos;
-        int32_t      *  n_seq_id;
-        llama_seq_id ** seq_id;
-        int8_t       *  logits; // TODO: rename this to "output"
+        llama_token  *  token;  // [n_tokens]  —  token id（可为空）
+        float        *  embd;   // [n_embd · n_tokens]  —  现成的 token embedding（可为空）
+        llama_pos    *  pos;    // [n_tokens]  —  每个 token 在各自序列中的绝对位置
+        int32_t      *  n_seq_id;  // [n_tokens]  —  每个 token 拥有多少个 seq‑id（通常 =1）
+        llama_seq_id ** seq_id; // [n_tokens]×[…] — 指向实际 seq‑id 列表
+        int8_t       *  logits; // [n_tokens]  —  0/1 掩码，是否要返回 logits / embeddings
     } llama_batch;
 
     enum llama_model_kv_override_type {
