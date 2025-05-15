@@ -369,6 +369,7 @@ struct node_alloc {
     struct tensor_alloc src[GGML_MAX_SRC];  // 源张量（输入）
 };
 
+// 通用 ggml 分配器
 struct ggml_gallocr {
     ggml_backend_buffer_type_t * bufts; // [n_buffers] 后端缓冲区类型数组
     ggml_backend_buffer_t * buffers; // [n_buffers] 后端缓冲区数组

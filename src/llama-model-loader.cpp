@@ -925,6 +925,7 @@ bool llama_model_loader::load_all_data(
 
     // 4 staging buffers for async uploads, each sized 1MB seems to be a good default for single NVMe drives.
     // NVMe raid configurations might require more / larger buffers.
+    // 4 × 1 MiB 固定大小的 pinned host buffer，用作 NVMe → GPU 的流水上传环。
     constexpr size_t n_buffers = 4;
     constexpr size_t buffer_size = 1 * 1024 * 1024; // 1MB
 
@@ -934,6 +935,7 @@ bool llama_model_loader::load_all_data(
     size_t buffer_idx = 0; // buffer to use for async loads
     // 初始化异步上传后端
     ggml_backend_t upload_backend = [&](const char * func) -> ggml_backend_t {
+        // 如果 mmap 或要核验数据，则直接 CPU 读取。
         if (use_mmap || check_tensors) {
             return nullptr;
         }
@@ -1030,6 +1032,7 @@ bool llama_model_loader::load_all_data(
         size_t n_size = ggml_nbytes(cur);
 
         if (use_mmap) {
+            // 直接把 weight->offs 偏移处的地址作为张量 data 指针
             // 从 mappings 获取 mmap 映射
             const auto & mapping = mappings.at(weight->idx);
             // 从 bufs 获取缓冲区（buf_mmap）
@@ -1066,6 +1069,7 @@ bool llama_model_loader::load_all_data(
                 ggml_backend_tensor_set(cur, data, 0, n_size);
             }
         } else {
+            // 文件流模式
             const auto & file = files.at(weight->idx);
             if (ggml_backend_buffer_is_host(cur->buffer)) {
                 file->seek(weight->offs, SEEK_SET);

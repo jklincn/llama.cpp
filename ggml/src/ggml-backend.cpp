@@ -621,30 +621,38 @@ static bool ggml_is_view_op(enum ggml_op op) {
 #endif
 
 struct ggml_backend_sched_split {
-    int backend_id;
-    int i_start;
+    int backend_id; // 该 split 运行在哪个后端 (索引到 sched->backends[])
+    // 子图在原始大图中节点索引区间 [i_start, i_end)
+    int i_start;    
     int i_end;
+    // 需要跨后端复制到本 backend 的张量指针列表
     struct ggml_tensor * inputs[GGML_SCHED_MAX_SPLIT_INPUTS];
+
+    // 上面数组的实际长度
     int n_inputs;
     // graph view of this split
+    // 子图视图，即仅含本 split 节点的新 ggml_cgraph
     struct ggml_cgraph graph;
 };
 
 struct ggml_backend_sched {
+    // 状态标记
     bool is_reset; // true if the scheduler has been reset since the last graph split
-    bool is_alloc;
+    bool is_alloc; // 分配（buffers / events）是否完成。reserve 调用成功后置 true。
 
-    int n_backends;
+    // 后端列表
+    int n_backends; // 实际注册的 backend 个数
+    ggml_backend_t backends[GGML_SCHED_MAX_BACKENDS]; // 设备后端
+    ggml_backend_buffer_type_t bufts[GGML_SCHED_MAX_BACKENDS]; // 后端缓冲区类型，与上面对应
+    ggml_gallocr_t galloc; // 通用 ggml-alloc 分配器
 
-    ggml_backend_t backends[GGML_SCHED_MAX_BACKENDS];
-    ggml_backend_buffer_type_t bufts[GGML_SCHED_MAX_BACKENDS];
-    ggml_gallocr_t galloc;
-
-    // hash map of the nodes in the graph
+    // 图中节点到后端的映射缓存
     struct ggml_hash_set  hash_set;
     int                 * hv_tensor_backend_ids; // [hash_set.size]
+    // 张量跨后端的复制版本指针，配合 pipeline-copy 环形缓冲区
     struct ggml_tensor ** hv_tensor_copies;      // [hash_set.size][n_backends][n_copies]
 
+    // 每个节点/叶子最终映射到哪个 backend
     int * node_backend_ids; // [graph_size]
     int * leaf_backend_ids; // [graph_size]
 
@@ -652,14 +660,18 @@ struct ggml_backend_sched {
     int * prev_leaf_backend_ids; // [graph_size]
 
     // copy of the graph with modified inputs
+    // graph_build() 产出的原始大图，但输入张量可能已替换成拷贝版本
     struct ggml_cgraph graph;
 
     // graph splits
+    // 动态数组，存放所有 split 对象
     struct ggml_backend_sched_split * splits;
+    // 当前 split 数量与已分配容量
     int n_splits;
     int splits_capacity;
 
     // pipeline parallelism support
+    // 流水线并行支持
     int n_copies;
     int cur_copy;
     ggml_backend_event_t events[GGML_SCHED_MAX_BACKENDS][GGML_SCHED_MAX_COPIES];
@@ -668,6 +680,7 @@ struct ggml_backend_sched {
 
     struct ggml_context * ctx;
 
+    // 执行回调
     ggml_backend_sched_eval_callback callback_eval;
     void * callback_eval_user_data;
 
@@ -1355,12 +1368,15 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
     struct ggml_backend_sched_split * splits = sched->splits;
 
+    // 按顺序遍历所有 splits
     for (int i = 0; i < sched->n_splits; i++) {
         struct ggml_backend_sched_split * split = &splits[i];
         int split_backend_id = split->backend_id;
+        // 为当前 split 选择目标 backend
         ggml_backend_t split_backend = sched->backends[split_backend_id];
 
         // copy the input tensors to the split backend
+        // 把该 split 需要的输入张量复制到对应 backend
         for (int j = 0; j < split->n_inputs; j++) {
             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[j]);
             struct ggml_tensor * input = split->inputs[j];
@@ -1368,14 +1384,17 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
                 // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
+                // 对于用户显式提供的输入，必须立即同步，防止用户层面还没 copy 完就去改数据
                 if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
                     ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
                 } else {
                     ggml_backend_synchronize(split_backend);
                 }
+                // 把 inputs 里需要的张量复制到目标 backend
                 ggml_backend_tensor_copy(input, input_cpy);
             } else {
                 // wait for the split backend to finish using the input before overwriting it
+                // 确保目的 backend 不再使用旧版数据
                 if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
                     ggml_backend_event_wait(split_backend, sched->events[split_backend_id][sched->cur_copy]);
                 } else {
@@ -1383,6 +1402,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 }
                 // try async copy, but if not possible, we can still use a sync copy without synchronizing the dst backend, since we handle the synchronization here with multiple copies and events
                 // TODO: add public function to facilitate this, since applications do not have direct access to the backend interface
+                // 优先尝试异步 copy；如果后端不支持，就退回到同步方案。
                 if (!split_backend->iface.cpy_tensor_async || !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
                     ggml_backend_synchronize(input_backend);
                     if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
@@ -1390,17 +1410,22 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     } else {
                         ggml_backend_synchronize(split_backend);
                     }
+                    // 把 inputs 里需要的张量复制到目标 backend
                     ggml_backend_tensor_copy(input, input_cpy);
                 }
             }
         }
 
         if (!sched->callback_eval) {
+            // 常规路径，送入子图计算
+            // CPU：ggml_backend_cpu_graph_compute
+            // GPU：ggml_backend_cuda_graph_compute
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
             if (ec != GGML_STATUS_SUCCESS) {
                 return ec;
             }
         } else {
+            // 增量 / 按需路径（用户注册了 callback_eval）
             // similar to ggml_backend_compare_graph_backend
             for (int j0 = 0; j0 < split->graph.n_nodes; j0++) {
                 struct ggml_tensor * t = split->graph.nodes[j0];
@@ -1435,6 +1460,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         }
 
         // record the event of this copy
+        // 把 copy / compute 的完成时刻标记下来
         if (split->n_inputs > 0) {
             if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
                 ggml_backend_event_record(sched->events[split_backend_id][sched->cur_copy], split_backend);
@@ -1442,6 +1468,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         }
     }
 
+    // 形成固定深度的 copy 事件循环（n_copies），避免事件数组无限增长，可以与后续 split 重叠
     sched->cur_copy = (sched->cur_copy + 1) % sched->n_copies;
 
     return GGML_STATUS_SUCCESS;
@@ -1586,16 +1613,21 @@ enum ggml_status ggml_backend_sched_graph_compute(ggml_backend_sched_t sched, st
 }
 
 enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+    // 如果调度器的状态标志 is_reset 和 is_alloc 都是 false，表示调度器尚未重置或分配资源。
+    // 此时调用 ggml_backend_sched_reset(sched) 重置调度器状态
     if (!sched->is_reset && !sched->is_alloc) {
         ggml_backend_sched_reset(sched);
     }
 
+    // 如果调度器的 is_alloc 标志为 false，表示内存还没有为当前的计算图分配。
+    // 此时调用 ggml_backend_sched_alloc_graph(sched, graph) 来为计算图分配内存。
     if (!sched->is_alloc) {
         if (!ggml_backend_sched_alloc_graph(sched, graph)) {
             return GGML_STATUS_ALLOC_FAILED;
         }
     }
 
+    // 将计算任务拆分成更小的子任务，并调度它们异步执行
     return ggml_backend_sched_compute_splits(sched);
 }
 

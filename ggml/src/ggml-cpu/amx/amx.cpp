@@ -211,7 +211,6 @@ static bool ggml_amx_init() {
         fprintf(stderr, "AMX is not ready to be used!\n");
         return false;
     }
-    GGML_LOG_INFO("AMX is ready to be used!\n");
     return true;
 #elif defined(_WIN32)
     return true;

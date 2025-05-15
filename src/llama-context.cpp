@@ -309,6 +309,8 @@ llama_context::llama_context(
         cross.v_embd.clear();
 
         // reserve pp graph first so that buffers are only allocated once
+        // prefill 阶段往往占用模型计算的峰值显存/内存；先走一遍能拿到 upper-bound，
+        // 之后推理就不会因为遇到更大的 prompt 触发昂贵的重新分配或碎片整理
         {
             llama_ubatch ubatch_pp = { true, n_tokens, n_tokens / n_seqs, n_seqs, &token, nullptr, nullptr, nullptr, nullptr, nullptr};
 
@@ -330,6 +332,9 @@ llama_context::llama_context(
         }
 
         // reserve with tg graph to get the number of splits and nodes
+        // 让调度器计算出 TG(token-gen) 阶段实际需要的 split 数 / buffer 尺寸
+        // 推理阶段会在 PP → (TG × N 次) 之间来回切换。
+        // 如果 TG 图在显存里只占很小一块，单独 reserve 能显著减少显存浪费，并让 cur_copy、事件池等参数按最小需求调优
         {
             llama_ubatch ubatch_tg = { true, 1, 1, n_seqs, &token, nullptr, nullptr, nullptr, nullptr, nullptr};
 
@@ -349,6 +354,8 @@ llama_context::llama_context(
         }
 
         // reserve again with pp graph to avoid ggml-alloc reallocations during inference
+        // 如果前两次 reserve 改变了调度器内部的 split 或 buffer 选择（例如 TG 图让某些 node 选了不同 backend）
+        // 这里再跑一次 确保最终状态仍然能覆盖最大 prompt。
         {
             llama_ubatch ubatch_pp = { true, n_tokens, n_tokens / n_seqs, n_seqs, &token, nullptr, nullptr, nullptr, nullptr, nullptr};
 
@@ -378,6 +385,7 @@ llama_context::llama_context(
             }
         }
 
+        // 打印 graph nodes/splits 统计
         if (n_nodes_pp == n_nodes_tg) {
             LLAMA_LOG_INFO("%s: graph nodes  = %d\n", __func__, n_nodes_pp);
         } else {
@@ -1009,9 +1017,9 @@ int llama_context::decode(llama_batch & inp_batch) {
         }
 
         // plot the computation graph in dot format (for debugging purposes)
-        //if (n_past%100 == 0) {
+        // if (n_past%100 == 0) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
-        //}
+        // }
 
         auto * t_logits = cparams.embeddings ? nullptr         : res->get_logits();
         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
@@ -1308,20 +1316,25 @@ llm_graph_result_ptr llama_context::graph_build(
 ggml_status llama_context::graph_compute(
             ggml_cgraph * gf,
                    bool   batched) {
+    // 设置线程数和线程池（根据是否批量）
     int n_threads        = batched ? cparams.n_threads_batch : cparams.n_threads;
     ggml_threadpool_t tp = batched ? threadpool_batch        : threadpool;
 
+    // 配置 CPU 后端的线程池
     if (backend_cpu != nullptr) {
         auto * reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend_cpu));
         auto * set_threadpool_fn = (decltype(ggml_backend_cpu_set_threadpool) *) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cpu_set_threadpool");
+        // ggml_backend_cpu_set_threadpool
         set_threadpool_fn(backend_cpu, tp);
     }
 
     // set the number of threads for all the backends
+    // 为所有注册的后端设置线程数，看起来只有 CPU 后端支持
     for (const auto & set_n_threads_fn : set_n_threads_fns) {
         set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
     }
 
+    // 调用异步调度器执行计算图
     auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
