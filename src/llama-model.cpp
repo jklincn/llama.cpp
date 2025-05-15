@@ -22,6 +22,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "my-timer.hpp"
+
 const char * llm_type_name(llm_type type) {
     switch (type) {
         case LLM_TYPE_14M:           return "14M";
@@ -4319,39 +4321,42 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    // load tensor data
-    // 加载张量数据
-    for (auto & it : ctx_bufs) {
-        ggml_context * ctx = it.first;
-        auto & bufs = it.second;
-        if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
-            return false;
+    {
+        Timer t("load_all_data", "ms");
+        // load tensor data
+        // 加载张量数据
+        for (auto & it : ctx_bufs) {
+            ggml_context * ctx = it.first;
+            auto & bufs = it.second;
+            if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
+                return false;
+            }
         }
     }
 
     // 打印张量分配结果
-    {
-        std::vector<std::pair<std::string, struct ggml_tensor *>> sorted_tensors_by_name = tensors_by_name;
-        std::sort(sorted_tensors_by_name.begin(), sorted_tensors_by_name.end(),
-        [](const auto& a, const auto& b) {
-            return a.first < b.first;
-        });
-        for (const auto& tensor_pair : sorted_tensors_by_name) {
-            const std::string& name = tensor_pair.first;
-            struct ggml_tensor* tensor = tensor_pair.second;
-            
-            std::cout << name;
-            if (tensor != nullptr) {
-                if (tensor->buffer != nullptr) {
-                    std::cout << " (" << ggml_backend_buffer_name(tensor->buffer) << ")\n";
-                } else {
-                    std::cout << " (nullptr)\n";
-                }
-            } else {
-                std::cout << "tensor is nullptr\n";
-            }
-        }
-    }
+    // {
+    //     std::vector<std::pair<std::string, struct ggml_tensor *>> sorted_tensors_by_name = tensors_by_name;
+    //     std::sort(sorted_tensors_by_name.begin(), sorted_tensors_by_name.end(),
+    //     [](const auto& a, const auto& b) {
+    //         return a.first < b.first;
+    //     });
+    //     for (const auto& tensor_pair : sorted_tensors_by_name) {
+    //         const std::string& name = tensor_pair.first;
+    //         struct ggml_tensor* tensor = tensor_pair.second;
+
+    //         std::cout << name;
+    //         if (tensor != nullptr) {
+    //             if (tensor->buffer != nullptr) {
+    //                 std::cout << " (" << ggml_backend_buffer_name(tensor->buffer) << ")\n";
+    //             } else {
+    //                 std::cout << " (nullptr)\n";
+    //             }
+    //         } else {
+    //             std::cout << "tensor is nullptr\n";
+    //         }
+    //     }
+    // }
 
     if (use_mmap_buffer) {
         for (auto & mapping : ml.mappings) {
