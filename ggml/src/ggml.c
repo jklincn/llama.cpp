@@ -838,14 +838,24 @@ static const size_t GGML_OBJECT_SIZE = sizeof(struct ggml_object);
 // ggml context
 //
 
+// ggml_context = “一段大缓冲区 + 对象链表 + 状态标志”
+// 集中管理张量/计算图/临时工作区的内存，保证局部性、零碎片、一次性释放，
+// 并允许外部自定义这块内存（如 mmap、显存分配器）
 struct ggml_context {
+    // 缓冲区大小
     size_t mem_size;
+    // 缓冲区首地址
     void * mem_buffer;
+    // 缓冲区是否由 ggml 分配，如果是，则在 free 时进行释放；否则不释放。
     bool   mem_buffer_owned;
+    // 测算/占位模式。设成 true 时，各种 ggml_new_tensor_* 只登记大小而不真正分配数据；
+    // 通常先跑一遍得到所需内存，再重新初始化分配
     bool   no_alloc;
 
+    // 当前 ggml_object 个数
     int    n_objects;
 
+    // 把所有对象串成链表（每个节点即 ggml_object）
     struct ggml_object * objects_begin;
     struct ggml_object * objects_end;
 };

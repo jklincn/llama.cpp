@@ -488,7 +488,6 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
     }
 
     // read the tensor info
-    // 读取张量信息
     // struct gguf_tensor_info_t {
     //     // The name of the tensor. It is a standard GGUF string, with the caveat that
     //     // it must be at most 64 bytes long.
@@ -510,7 +509,9 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
     //     // Must be a multiple of `ALIGNMENT`. That is, `align_offset(offset) == offset`.
     //     uint64_t offset;
     // };
+    // 读取张量信息
     for (int64_t i = 0; ok && i < n_tensors; ++i) {
+        // 初始化张量信息
         struct gguf_tensor_info info;
 
         // tensor name
@@ -532,6 +533,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
                 ok = false;
                 break;
             }
+            // 这里设置的是 ggml_tensor 的 name 字段
             ggml_set_name(&info.t, name.c_str());
 
             // make sure there are no duplicate tensor names
@@ -638,8 +640,8 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             break;
         }
 
-        // 读取张量数据偏移量
         // tensor data offset within buffer
+        // 最后才设置当前张量数据的偏移量
         ok = ok && gr.read(info.offset);
 
         // 保存到 ctx 中
@@ -690,11 +692,12 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
         //   the ggml_tensor structs to the appropriate locations in the binary blob
 
         // compute the exact size needed for the new ggml_context
-        // 计算需要的内存大小，no_alloc 模式下只需要张量结构体的开销
+        // 计算需要的内存大小，no_alloc 模式下只需要张量结构体的开销，否则就是所有的。
         const size_t mem_size =
             params.no_alloc ?
             (n_tensors    )*ggml_tensor_overhead() :
             (n_tensors + 1)*ggml_tensor_overhead() + ctx->size;
+        // deepseek R1 中 mem_size = 1025*368 = 377200 = 368KB
 
         struct ggml_init_params pdata = {
             /*mem_size   =*/ mem_size,
@@ -702,7 +705,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             /*no_alloc   =*/ params.no_alloc,
         };
 
-        // 初始化GGML计算上下文，用于存储和操作张量
+        // 获得一个ggml上下文，用于存储和操作张量
         *params.ctx = ggml_init(pdata);
         if (*params.ctx == nullptr) {
             fprintf(stderr, "%s: failed to initialize ggml context for storing tensors\n", __func__);
