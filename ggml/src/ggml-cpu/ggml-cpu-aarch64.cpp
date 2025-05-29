@@ -72,8 +72,6 @@ static_assert(sizeof(block_iq4_nlx4) == 4 * sizeof(ggml_half) + QK4_NL * 2, "wro
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Woverlength-strings"
-#elif defined(_MSC_VER)
-#pragma warning(disable: 4244 4267) // possible loss of data
 #endif
 
 #define UNUSED GGML_UNUSED
@@ -1193,7 +1191,7 @@ static void ggml_gemv_q4_0_8x8_q8_0(int n, float * GGML_RESTRICT s, size_t bs, c
         }
     }
     return;
-#elif defined(__riscv_v_intrinsic)
+#elif defined __riscv_v
     if (__riscv_vlenb() >= QK4_0) {
         const size_t vl = QK4_0;
 
@@ -3785,7 +3783,7 @@ static void ggml_gemm_q4_0_8x8_q8_0(int n, float * GGML_RESTRICT s, size_t bs, c
         }
         return;
     }
-#elif defined(__riscv_v_intrinsic)
+#elif defined __riscv_v
     if (__riscv_vlenb() >= QK4_0) {
         const size_t vl = QK4_0;
 

@@ -14,6 +14,7 @@ add_library(llama
             llama-batch.cpp
             llama-chat.cpp
             llama-context.cpp
+            llama-cparams.cpp
             llama-grammar.cpp
             llama-graph.cpp
             llama-hparams.cpp
@@ -23,6 +24,7 @@ add_library(llama
             llama-memory.cpp
             llama-mmap.cpp
             llama-model-loader.cpp
+            llama-model-saver.cpp
             llama-model.cpp
             llama-quant.cpp
             llama-sampling.cpp

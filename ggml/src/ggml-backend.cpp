@@ -687,6 +687,8 @@ struct ggml_backend_sched {
     char * context_buffer;
     size_t context_buffer_size;
 
+    bool op_offload;
+
     int debug;
 };
 
@@ -779,7 +781,7 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
         if (tensor->op != GGML_OP_ROPE && src->buffer != NULL && src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
             int src_backend_id = ggml_backend_sched_backend_from_buffer(sched, src, tensor);
             // check if a backend with higher prio wants to offload the op
-            if (src_backend_id == sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
+            if (sched->op_offload && src_backend_id == sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
                 for (int b = 0; b < src_backend_id; b++) {
                     if (ggml_backend_supports_op(sched->backends[b], tensor) && ggml_backend_offload_op(sched->backends[b], tensor)) {
                         SET_CAUSE(tensor, "1.off");
@@ -1122,7 +1124,7 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
 
             const int node_backend_id = tensor_backend_id(node);
 
-            assert(node_backend_id != -1); // all nodes should be assigned by now
+            assert(node_backend_id != -1); // all nodes should be assigned by now, this can happen if there is no CPU fallback
 
             // check if we should start a new split based on the sources of the current node
             bool need_new_split = false;
@@ -1479,10 +1481,10 @@ ggml_backend_sched_t ggml_backend_sched_new(
         ggml_backend_buffer_type_t * bufts,
         int n_backends,
         size_t graph_size,
-        bool parallel) {
-    GGML_ASSERT(n_backends > 0);  // 确保至少有一个后端设备
-    GGML_ASSERT(n_backends <= GGML_SCHED_MAX_BACKENDS); // 确保后端数量不超过最大限制
-    // 确保最后一个后端是 CPU 类型
+        bool parallel,
+        bool op_offload) {
+    GGML_ASSERT(n_backends > 0);
+    GGML_ASSERT(n_backends <= GGML_SCHED_MAX_BACKENDS);
     GGML_ASSERT(ggml_backend_dev_type(ggml_backend_get_device(backends[n_backends - 1])) == GGML_BACKEND_DEVICE_TYPE_CPU);
 
     // 初始化结构体
@@ -1532,6 +1534,7 @@ ggml_backend_sched_t ggml_backend_sched_new(
 
     // 创建一个新的计算图内存分配器，它将负责管理在不同后端设备上分配的内存
     sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
+    sched->op_offload = op_offload;
 
     // 重置调度器状态
     ggml_backend_sched_reset(sched);
@@ -1635,6 +1638,9 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
     for (int i = 0; i < sched->n_backends; i++) {
         ggml_backend_synchronize(sched->backends[i]);
     }
+    // reset the current copy to 0 so that the graphs will be similar during generation
+    // necessary for CUDA graphs
+    sched->cur_copy = 0;
 }
 
 void ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data) {

@@ -4,6 +4,7 @@
 #include "llama-mmap.h"
 #include "llama-vocab.h"
 #include "llama-model-loader.h"
+#include "llama-model-saver.h"
 #include "llama-model.h"
 
 #include "ggml.h"
@@ -144,7 +145,11 @@ static struct llama_model * llama_model_load_from_file_impl(
     // 初始化计时器，linux上是空实现
     ggml_time_init();
 
-    // 进度回调
+    if (!params.vocab_only && ggml_backend_reg_count() == 0) {
+        LLAMA_LOG_ERROR("%s: no backends are loaded. hint: use ggml_backend_load() or ggml_backend_load_all() to load a backend before calling this function\n", __func__);
+        return nullptr;
+    }
+
     unsigned cur_percentage = 0;
     // 用户无定义则使用默认回调（打印进度条）
     if (params.progress_callback == NULL) {
@@ -270,6 +275,13 @@ struct llama_model * llama_model_load_from_splits(
     return llama_model_load_from_file_impl(splits.front(), splits, params);
 }
 
+void llama_model_save_to_file(const struct llama_model * model, const char * path_model) {
+    llama_model_saver ms(*model);
+    ms.add_kv_from_model();
+    ms.add_tensors_from_model();
+    ms.save(path_model);
+}
+
 //
 // chat templates
 //
@@ -355,3 +367,4 @@ const char * llama_print_system_info(void) {
 
     return s.c_str();
 }
+
