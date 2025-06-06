@@ -91,6 +91,7 @@ enum error_type {
     ERROR_TYPE_NOT_SUPPORTED, // custom error
 };
 
+// 推理参数
 struct slot_params {
     bool stream        = true;
     bool cache_prompt  = true; // remember the prompt to avoid reprocessing all prompt
@@ -193,6 +194,7 @@ struct slot_params {
     }
 };
 
+// 任务描述
 struct server_task {
     int id    = -1; // to be filled by server_queue
     int index = -1; // used when there are multiple prompts (batch request)
@@ -535,6 +537,7 @@ struct result_timings {
     }
 };
 
+// 任务结果
 struct server_task_result {
     int id           = -1;
     int id_slot      = -1;
@@ -630,6 +633,7 @@ struct completion_token_output {
     }
 };
 
+// 任务结果
 struct server_task_result_cmpl_final : server_task_result {
     int index = 0;
 
@@ -1220,6 +1224,7 @@ struct server_task_result_apply_lora : server_task_result {
     }
 };
 
+// 推理槽（上下文/会话）
 struct server_slot {
     int id;
     int id_task = -1;
@@ -1498,6 +1503,7 @@ struct server_slot {
     }
 };
 
+// 统计信息
 struct server_metrics {
     int64_t t_start = 0;
 
@@ -1550,6 +1556,7 @@ struct server_metrics {
     }
 };
 
+// 任务队列
 struct server_queue {
     int id = 0;
     bool running;
@@ -1659,9 +1666,11 @@ struct server_queue {
         running = true;
 
         while (true) {
+            // 记录日志，表示开始处理新任务
             QUE_DBG("%s", "processing new tasks\n");
 
             while (true) {
+                // 获取互斥锁 mutex_tasks，以保护对共享任务队列的访问
                 std::unique_lock<std::mutex> lock(mutex_tasks);
                 if (!running) {
                     QUE_DBG("%s", "terminate\n");
@@ -1671,19 +1680,26 @@ struct server_queue {
                     lock.unlock();
                     break;
                 }
+                // 从任务队列的前端取出一个任务
                 server_task task = std::move(queue_tasks.front());
+                // 将取出的任务从队列中移除
                 queue_tasks.pop_front();
                 lock.unlock();
 
+                // 记录正在处理的任务 ID
                 QUE_DBG("processing task, id = %d\n", task.id);
+                // 调用注册的回调函数
                 callback_new_task(std::move(task));
             }
 
             // all tasks in the current loop is processed, slots data is now ready
+            // 记录日志，表示当前批次的任务已初步处理完毕，准备更新所有槽位的状态
             QUE_DBG("%s", "update slots\n");
 
+            // 调用注册的回调函数，执行实际模型推理
             callback_update_slots();
 
+            // 记录日志，表示当前轮次的槽位更新已完成，线程将等待新任务
             QUE_DBG("%s", "waiting for new tasks\n");
             {
                 std::unique_lock<std::mutex> lock(mutex_tasks);
@@ -1691,6 +1707,9 @@ struct server_queue {
                     QUE_DBG("%s", "terminate\n");
                     return;
                 }
+                // 如果任务队列仍然为空，使用条件变量 condition_tasks 使当前线程进入等待状态。线程会释放锁 lock 并阻塞，直到以下任一条件满足：
+                // 1. 任务队列不再为空（即有新任务被其他线程通过 notify_one() 或 notify_all() 推入并唤醒此线程）
+                // 2. 运行状态 running 被设置为 false（即服务器被终止）
                 if (queue_tasks.empty()) {
                     condition_tasks.wait(lock, [&]{
                         return (!queue_tasks.empty() || !running);
@@ -1715,6 +1734,7 @@ private:
     }
 };
 
+// 结果队列
 struct server_response {
     bool running = true;
 
@@ -1847,46 +1867,64 @@ struct server_response {
     }
 };
 
+// 服务端全局上下文
 struct server_context {
-    common_params params_base;
+    common_params params_base; // 基础通用参数，通常来自命令行或配置文件
 
+    // 注意：保持这些对象的生命周期 - 它们决定了模型、上下文等的生命周期
     // note: keep these alive - they determine the lifetime of the model, context, etc.
-    common_init_result llama_init;
-    common_init_result llama_init_dft;
+    common_init_result llama_init; // 主要模型的初始化结果
+    common_init_result llama_init_dft; // 草稿模型（用于推测解码）的初始化结果
 
+    // 指向已加载的 Llama 模型对象的指针
     llama_model * model = nullptr;
+    // 指向 Llama 模型执行上下文的指针 (主模型)
     llama_context * ctx = nullptr;
 
+    // 多模态上下文，用于处理图像等多模态输入
     // multimodal
     mtmd_context * mctx = nullptr;
 
+    // 指向模型词汇表的指针
     const llama_vocab * vocab = nullptr;
 
+    // 指向草稿模型的指针（用于推测解码）
     llama_model * model_dft = nullptr;
 
+    // 草稿模型的上下文参数
     llama_context_params cparams_dft;
 
+    // 用于模型推理的批处理对象
     llama_batch batch {};
 
-    bool clean_kv_cache = true;
-    bool add_bos_token  = true;
-    bool has_eos_token  = false;
+    bool clean_kv_cache = true; // 标志位：是否在所有槽位空闲时清理KV缓存
+    bool add_bos_token  = true; // 标志位：是否自动为prompt添加BOS (Begin Of Sentence) token
+    bool has_eos_token  = false; // 标志位：模型是否具有EOS (End Of Sentence) token (这个似乎在当前版本中主要用于判断，而不是主动添加)
 
+    // 所有客户端/槽位共享的总上下文长度
     int32_t n_ctx; // total context for all clients / slots
 
+    // 槽位/客户端：存储所有活动或等待处理的客户端请求/会话 (server_slot)
     // slots / clients
     std::vector<server_slot> slots;
+    // JSON对象，存储用于属性（props）的默认生成设置
     json default_generation_settings_for_props;
 
+    // 任务队列，存储待处理的服务端任务
     server_queue    queue_tasks;
+    // 结果队列，存储已处理完成的响应
     server_response queue_results;
 
+    // 服务端性能指标收集器
     server_metrics metrics;
 
+    // 用于槽位选择的prompt相似度阈值 (当一个新请求进来时，如果其prompt与某个空闲槽位之前的prompt足够相似，可能会复用该槽位)
     // Necessary similarity of prompt for slot selection
     float slot_prompt_similarity = 0.0f;
 
+    // 指向聊天模板管理对象的智能指针
     common_chat_templates_ptr chat_templates;
+    // OpenAI兼容性解析器的选项
     oaicompat_parser_options  oai_parser_opt;
 
     ~server_context() {
@@ -2720,6 +2758,7 @@ struct server_context {
 
     void process_single_task(server_task && task) {
         switch (task.type) {
+            // 推理类任务
             case SERVER_TASK_TYPE_COMPLETION:
             case SERVER_TASK_TYPE_INFILL:
             case SERVER_TASK_TYPE_EMBEDDING:
@@ -2727,6 +2766,7 @@ struct server_context {
                 {
                     const int id_slot = task.id_selected_slot;
 
+                    // 如果任务指定了特定槽位ID，则获取该槽位；否则获取一个可用的槽位
                     server_slot * slot = id_slot != -1 ? get_slot_by_id(id_slot) : get_available_slot(task);
 
                     if (slot == nullptr) {
@@ -2742,11 +2782,13 @@ struct server_context {
                         break;
                     }
 
+                    // 将任务分配给槽位并初始化推理过程
                     if (!launch_slot_with_task(*slot, std::move(task))) {
                         SRV_ERR("failed to launch slot with task, id_task = %d\n", task.id);
                         break;
                     }
                 } break;
+            // 取消任务
             case SERVER_TASK_TYPE_CANCEL:
                 {
                     // release slot linked with the task id
@@ -2761,6 +2803,7 @@ struct server_context {
                 {
                     // do nothing
                 } break;
+            // 获取指标
             case SERVER_TASK_TYPE_METRICS:
                 {
                     json slots_data = json::array();
@@ -2933,36 +2976,50 @@ struct server_context {
         }
     }
 
+    // 最核心的推理调度函数，负责管理所有并发会话槽位的状态并执行实际的模型推理
     void update_slots() {
+        // 检查所有槽位是否都处于空闲状态
         // check if all slots are idle
         {
+            // 假设所有槽位都是空闲的
             bool all_idle = true;
 
+            // 遍历所有槽位
             for (auto & slot : slots) {
+                // 如果任何一个槽位正在处理中 (is_processing() 返回 true)
                 if (slot.is_processing()) {
                     all_idle = false;
                     break;
                 }
             }
 
+            // 检查所有槽位是否都处于空闲状态 (上面循环的结果)
             if (all_idle) {
                 SRV_INF("%s", "all slots are idle\n");
                 if (clean_kv_cache) {
+                    // 清理KV缓存
                     kv_cache_clear();
                 }
 
+                // 如果所有槽位都空闲，则此函数直接返回，不做后续处理
                 return;
             }
         }
 
+        // 如果有槽位不空闲，则准备处理
         {
             SRV_DBG("%s", "posting NEXT_RESPONSE\n");
 
+            // 创建一个类型为 SERVER_TASK_TYPE_NEXT_RESPONSE 的任务
+            // 这通常意味着通知主循环或某个工作线程可以准备发送下一个响应了
             server_task task(SERVER_TASK_TYPE_NEXT_RESPONSE);
+            // 为该任务分配一个新的唯一ID
             task.id = queue_tasks.get_new_id();
+            // 将任务移动到任务队列中
             queue_tasks.post(std::move(task));
         }
 
+        // 当槽位的上下文即将用完时，进行上下文移位操作
         // apply context-shift if needed
         // TODO: simplify and improve
         for (server_slot & slot : slots) {
@@ -3019,6 +3076,8 @@ struct server_context {
             return params_base.special || slot.params.sampling.preserved_tokens.find(token) != slot.params.sampling.preserved_tokens.end();
         };
 
+        // 分两个阶段构建推理批次：
+        // 第一阶段：添加已采样的 token（生成阶段）
         // frist, add sampled tokens from any ongoing sequences
         for (auto & slot : slots) {
             if (slot.state != SLOT_STATE_GENERATING) {
@@ -3047,6 +3106,7 @@ struct server_context {
         int32_t n_batch  = llama_n_batch(ctx);
         int32_t n_ubatch = llama_n_ubatch(ctx);
 
+        // 第二阶段：添加待处理的 prompt token
         // next, batch any pending prompts without exceeding n_batch
         if (params_base.cont_batching || batch.n_tokens == 0) {
             for (auto & slot : slots) {
@@ -3063,6 +3123,7 @@ struct server_context {
                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                     auto & prompt_tokens = slot.prompt_tokens;
 
+                    // 初始化新prompt，设置各种参数
                     // TODO: maybe move branch to outside of this loop in the future
                     if (slot.state == SLOT_STATE_STARTED) {
                         slot.t_start_process_prompt = ggml_time_us();
@@ -3382,10 +3443,12 @@ struct server_context {
             }
         }
 
+        // 批量推理执行
         // process the created batch of tokens
         for (int32_t i = 0; i < batch.n_tokens; i += n_batch) {
             const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
 
+            // 创建批次视图
             llama_batch batch_view = {
                 n_tokens,
                 batch.token    + i,
@@ -3396,6 +3459,7 @@ struct server_context {
                 batch.logits   + i,
             };
 
+            // 执行实际的模型推理
             const int ret = llama_decode(ctx, batch_view);
 
             metrics.on_decoded(slots);
@@ -4176,11 +4240,13 @@ int main(int argc, char ** argv) {
         try {
             std::vector<server_task> tasks;
 
+            // 提取 Prompt
             const auto & prompt = data.at("prompt");
             // TODO: this log can become very long, put it behind a flag or think about a more compact format
             //SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
 
             // process files
+            // 处理多模态文件 (如果支持)
             mtmd::bitmaps bitmaps;
             const bool has_mtmd = ctx_server.mctx != nullptr;
             {
@@ -4228,6 +4294,7 @@ int main(int argc, char ** argv) {
                 inputs.push_back(std::move(tmp));
             } else {
                 // non-multimodal version
+                // Tokenize 输入
                 auto tokenized_prompts = tokenize_input_prompts(ctx_server.vocab, prompt, true, true);
                 for (auto & p : tokenized_prompts) {
                     auto tmp = server_tokens(p, ctx_server.mctx != nullptr);
@@ -4235,6 +4302,7 @@ int main(int argc, char ** argv) {
                 }
             }
 
+            // 对于每一个处理后的输入 prompt，创建一个 server_task 对象
             tasks.reserve(inputs.size());
             for (size_t i = 0; i < inputs.size(); i++) {
                 server_task task = server_task(type);
@@ -4258,6 +4326,7 @@ int main(int argc, char ** argv) {
             }
 
             task_ids = server_task::get_list_id(tasks);
+            // 任务入队
             ctx_server.queue_results.add_waiting_tasks(tasks);
             ctx_server.queue_tasks.post(std::move(tasks));
         } catch (const std::exception & e) {
@@ -4268,6 +4337,7 @@ int main(int argc, char ** argv) {
         bool stream = json_value(data, "stream", false);
 
         if (!stream) {
+            // 等待所有相关的 task_ids 完成并收集它们的结果
             ctx_server.receive_multi_results(task_ids, [&](std::vector<server_task_result_ptr> & results) {
                 if (results.size() == 1) {
                     // single result
@@ -4818,6 +4888,7 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // 路由注册
     // register API routes
     svr->Get ("/health",              handle_health); // public endpoint (no API key check)
     svr->Get ("/metrics",             handle_metrics);
@@ -4921,10 +4992,12 @@ int main(int argc, char ** argv) {
         common_chat_templates_source(ctx_server.chat_templates.get()),
         common_chat_format_example(ctx_server.chat_templates.get(), ctx_server.params_base.use_jinja).c_str());
 
+    // 注册新任务回调函数
     ctx_server.queue_tasks.on_new_task([&ctx_server](server_task && task) {
         ctx_server.process_single_task(std::move(task));
     });
 
+    // 注册实际推理回调函数
     ctx_server.queue_tasks.on_update_slots([&ctx_server]() {
         ctx_server.update_slots();
     });
