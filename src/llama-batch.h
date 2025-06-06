@@ -15,15 +15,15 @@ struct llama_ubatch {
     bool equal_seqs;
     // TODO: whole_seqs for embeddings?
 
-    uint32_t n_tokens; // total tokens (n_seq_tokens * n_seqs) 全批 token 总数 = n_seq_tokens * n_seqs
-    uint32_t n_seq_tokens; // tokens per sequence 每条序列平均token数量
-    uint32_t n_seqs; // 序列条数
+    uint32_t n_tokens;     // total tokens (n_seq_tokens * n_seqs)
+    uint32_t n_seq_tokens; // tokens per sequence
+    uint32_t n_seqs;
 
-    llama_token  *  token;    // [n_tokens] 指向 token ID 数组，长度 = n_tokens
-    float        *  embd;     // [n_embd, n_tokens] 可选：直接给定 embedding
-    llama_pos    *  pos;      // [n_tokens] 每 token 的 当前位置
-    int32_t      *  n_seq_id; // [n_seqs] 每条序列包含多少个 sequence‑id，通常为 1
-    llama_seq_id ** seq_id;   // [n_seqs] 二维指针：seq_id[s] 指向长度 n_seq_id[s] 的 id 列表
+    llama_token  *  token;    // [n_tokens]
+    float        *  embd;     // [n_embd, n_tokens]
+    llama_pos    *  pos;      // [n_tokens]
+    int32_t      *  n_seq_id; // [n_seqs] // TODO: remove, should belong to only 1 sequence
+    llama_seq_id ** seq_id;   // [n_seqs] // TODO: become llama_seq_id * seq_id;
     int8_t       *  output;   // [n_tokens]
 };
 
@@ -55,13 +55,18 @@ struct llama_sbatch {
 
     const llama_batch * batch = nullptr;
 
-    // buffers for the ubatch
-    std::vector<llama_token>    ubatch_token;
-    std::vector<float>          ubatch_embd;
-    std::vector<llama_pos>      ubatch_pos;
-    std::vector<int32_t>        ubatch_n_seq_id;
-    std::vector<llama_seq_id *> ubatch_seq_id;
-    std::vector<int8_t>         ubatch_output;
+    // buffers for the ubatches
+    // TODO: very hacky, this needs a complete rework
+    struct ubatch_data {
+        std::vector<llama_token>    token;
+        std::vector<float>          embd;
+        std::vector<llama_pos>      pos;
+        std::vector<int32_t>        n_seq_id;
+        std::vector<llama_seq_id *> seq_id;
+        std::vector<int8_t>         output;
+    };
+
+    std::vector<ubatch_data> udatas;
 
     llama_ubatch reserve_ubatch(size_t n_ubatch, bool has_embd = false);
 
