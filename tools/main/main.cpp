@@ -157,6 +157,8 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    auto * mem = llama_get_memory(ctx);
+
     const llama_vocab * vocab = llama_model_get_vocab(model);
     auto chat_templates = common_chat_templates_init(model, params.chat_template);
 
@@ -304,6 +306,7 @@ int main(int argc, char ** argv) {
 
             if (!params.system_prompt.empty() || !params.prompt.empty()) {
                 common_chat_templates_inputs inputs;
+                inputs.use_jinja = g_params->use_jinja;
                 inputs.messages = chat_msgs;
                 inputs.add_generation_prompt = !params.prompt.empty();
 
@@ -366,7 +369,7 @@ int main(int argc, char ** argv) {
         }
 
         // remove any "future" tokens that we might have inherited from the previous session
-        llama_kv_self_seq_rm(ctx, -1, n_matching_session_tokens, -1);
+        llama_memory_seq_rm(mem, -1, n_matching_session_tokens, -1);
     }
 
     LOG_DBG("recalculate the cached logits (check): embd_inp.size() %zu, n_matching_session_tokens %zu, embd_inp.size() %zu, session_tokens.size() %zu\n",
@@ -623,8 +626,8 @@ int main(int argc, char ** argv) {
                             n_past, n_left, n_ctx, params.n_keep, n_discard);
 
                     // 移除和重新排列KV缓存
-                    llama_kv_self_seq_rm (ctx, 0, params.n_keep            , params.n_keep + n_discard);
-                    llama_kv_self_seq_add(ctx, 0, params.n_keep + n_discard, n_past, -n_discard);
+                    llama_memory_seq_rm (mem, 0, params.n_keep            , params.n_keep + n_discard);
+                    llama_memory_seq_add(mem, 0, params.n_keep + n_discard, n_past, -n_discard);
 
                     n_past -= n_discard;
 
@@ -648,9 +651,9 @@ int main(int argc, char ** argv) {
                     LOG_DBG("div:   [%6d, %6d] / %6d -> [%6d, %6d]\n", ga_i + ib*bd, ga_i + ib*bd + ga_w, ga_n, (ga_i + ib*bd)/ga_n, (ga_i + ib*bd + ga_w)/ga_n);
                     LOG_DBG("shift: [%6d, %6d] + %6d -> [%6d, %6d]\n", ga_i + ib*bd + ga_w, n_past + ib*bd, dd, ga_i + ib*bd + ga_w + dd, n_past + ib*bd + dd);
 
-                    llama_kv_self_seq_add(ctx, 0, ga_i,                n_past,              ib*bd);
-                    llama_kv_self_seq_div(ctx, 0, ga_i + ib*bd,        ga_i + ib*bd + ga_w, ga_n);
-                    llama_kv_self_seq_add(ctx, 0, ga_i + ib*bd + ga_w, n_past + ib*bd,      dd);
+                    llama_memory_seq_add(mem, 0, ga_i,                n_past,              ib*bd);
+                    llama_memory_seq_div(mem, 0, ga_i + ib*bd,        ga_i + ib*bd + ga_w, ga_n);
+                    llama_memory_seq_add(mem, 0, ga_i + ib*bd + ga_w, n_past + ib*bd,      dd);
 
                     n_past -= bd;
 
@@ -952,10 +955,19 @@ int main(int argc, char ** argv) {
                     embd_inp.insert(embd_inp.end(), line_inp.begin(), line_inp.end());
                     embd_inp.insert(embd_inp.end(), line_sfx.begin(), line_sfx.end());
 
+                    if (params.verbose_prompt) {
+                        LOG_INF("%s: number of tokens in prompt = %zu\n", __func__, embd_inp.size() - original_size);
+                    }
+
                     for (size_t i = original_size; i < embd_inp.size(); ++i) {
                         const llama_token token = embd_inp[i];
+                        const std::string token_str = common_token_to_piece(ctx, token);
                         output_tokens.push_back(token);
-                        output_ss << common_token_to_piece(ctx, token);
+                        output_ss << token_str;
+
+                        if (params.verbose_prompt) {
+                            LOG_INF("%6d -> '%s'\n", token, token_str.c_str());
+                        }
                     }
 
                     // reset assistant message
