@@ -3035,6 +3035,7 @@ struct server_context {
                     GGML_ABORT("not supported by multimodal");
                 }
 
+                // 执行上下文移位
                 // Shift context
                 const int n_keep    = slot.params.n_keep + add_bos_token;
                 const int n_left    = slot.n_past - n_keep;
@@ -3045,6 +3046,7 @@ struct server_context {
                 llama_kv_self_seq_rm (ctx, slot.id, n_keep            , n_keep + n_discard);
                 llama_kv_self_seq_add(ctx, slot.id, n_keep + n_discard, slot.n_past,        -n_discard);
 
+                // 更新槽位中缓存的token (slot.cache_tokens) 以反映上下文移位
                 // add generated tokens to cache
                 {
                     llama_tokens new_tokens = slot.cache_tokens.get_text_tokens(); // copy
@@ -3057,18 +3059,21 @@ struct server_context {
                     slot.cache_tokens.insert(new_tokens);
                 }
 
+                // 更新槽位已处理的token数量
                 slot.n_past -= n_discard;
 
                 slot.truncated = true;
             }
         }
 
+        // 开始为本次迭代填充批处理 (batch)
         // start populating the batch for this iteration
         common_batch_clear(batch);
 
         // track if given slot can be batched with slots already in the batch
         server_slot * slot_batched = nullptr;
 
+        // 定义一个lambda函数，用于判断一个token是否是特殊token或用户希望保留的token
         auto accept_special_token = [&](server_slot & slot, llama_token token) {
             return params_base.special || slot.params.sampling.preserved_tokens.find(token) != slot.params.sampling.preserved_tokens.end();
         };
@@ -3076,11 +3081,14 @@ struct server_context {
         // 分两个阶段构建推理批次：
         // 第一阶段：添加已采样的 token（生成阶段）
         // frist, add sampled tokens from any ongoing sequences
+        // 遍历所有槽位
         for (auto & slot : slots) {
+            // 如果槽位状态不是 SLOT_STATE_GENERATING (即不是正在生成token的状态)，则跳过
             if (slot.state != SLOT_STATE_GENERATING) {
                 continue;
             }
 
+            // 检查是否可以将此槽位与前一个槽位进行批处理
             // check if we can batch this slot with the previous one
             if (!slot_batched) {
                 slot_batched = &slot;
@@ -3095,17 +3103,21 @@ struct server_context {
             slot.n_past += 1;
             slot.cache_tokens.push_back(slot.sampled);
 
+             // 打印调试日志，显示槽位解码token的相关信息
             SLT_DBG(slot, "slot decode token, n_ctx = %d, n_past = %d, n_cache_tokens = %d, truncated = %d\n",
                     slot.n_ctx, slot.n_past, (int) slot.cache_tokens.size(), slot.truncated);
         }
 
+        // 以 params.n_batch (物理批处理大小) 为块进行处理
         // process in chunks of params.n_batch
         int32_t n_batch  = llama_n_batch(ctx);
         int32_t n_ubatch = llama_n_ubatch(ctx);
 
         // 第二阶段：添加待处理的 prompt token
         // next, batch any pending prompts without exceeding n_batch
+        // 如果启用了连续批处理 (cont_batching) 或者当前批处理为空 (意味着没有正在生成的序列)
         if (params_base.cont_batching || batch.n_tokens == 0) {
+            // 遍历所有槽位
             for (auto & slot : slots) {
                 // check if we can batch this slot with the previous one
                 if (slot.is_processing()) {
@@ -3123,9 +3135,11 @@ struct server_context {
                     // 初始化新prompt，设置各种参数
                     // TODO: maybe move branch to outside of this loop in the future
                     if (slot.state == SLOT_STATE_STARTED) {
+                        // 记录开始处理prompt的时间戳
                         slot.t_start_process_prompt = ggml_time_us();
                         slot.t_start_generation = 0;
 
+                        // 已处理token数清零
                         slot.n_past = 0;
                         slot.n_prompt_tokens = prompt_tokens.size();
                         slot.state = SLOT_STATE_PROCESSING_PROMPT;
@@ -3145,6 +3159,7 @@ struct server_context {
                             }
                         }*/
 
+                        // 如果传入的prompt为空
                         // empty prompt passed -> release the slot and send empty response
                         if (prompt_tokens.empty()) {
                             SLT_WRN(slot, "%s", "empty prompt - releasing slot\n");
@@ -3155,6 +3170,7 @@ struct server_context {
                             continue;
                         }
 
+                        // 如果是非因果任务 (如embedding)
                         if (slot.is_non_causal()) {
                             if (slot.n_prompt_tokens > n_ubatch) {
                                 slot.release();
@@ -3167,7 +3183,8 @@ struct server_context {
                                 send_error(slot, "input is larger than the max context size. skipping", ERROR_TYPE_SERVER);
                                 continue;
                             }
-                        } else {
+                        } else { // 如果是因果任务 (如文本生成)
+                            // 如果上下文移位功能未启用
                             if (!params_base.ctx_shift) {
                                 // if context shift is disabled, we make sure prompt size is smaller than KV size
                                 // TODO: there should be a separate parameter that control prompt truncation
@@ -3183,22 +3200,28 @@ struct server_context {
                             }
                             slot.params.n_keep = std::min(slot.n_ctx - 4, slot.params.n_keep);
 
+                            // 如果输入的prompt太长，则进行截断
                             // if input prompt is too big, truncate it
                             if (slot.n_prompt_tokens >= slot.n_ctx) {
                                 if (mctx) {
+                                    // 多模态不应到这里
                                     // we should never reach this
                                     GGML_ABORT("not supported by multimodal");
                                 }
+                                // 计算截断参数
                                 const int n_left = slot.n_ctx - slot.params.n_keep;
 
                                 const int n_block_size = n_left / 2;
+                                // 计算需要删除的块数，从 n_keep 之后开始删除
                                 const int erased_blocks = (slot.n_prompt_tokens - slot.params.n_keep - n_block_size) / n_block_size;
 
                                 const llama_tokens & curr_tokens = slot.prompt_tokens.get_text_tokens();
+                                // 创建新的token列表，首先加入 n_keep 个token
                                 llama_tokens new_tokens(
                                         curr_tokens.begin(),
                                         curr_tokens.begin() + slot.params.n_keep);
 
+                                // 然后跳过 erased_blocks * n_block_size 个token，加入剩余的token
                                 new_tokens.insert(
                                         new_tokens.end(),
                                         curr_tokens.begin() + slot.params.n_keep + erased_blocks * n_block_size,
@@ -3207,6 +3230,7 @@ struct server_context {
                                 prompt_tokens.clear();
                                 prompt_tokens.insert(new_tokens);
 
+                                // 标记为已截断
                                 slot.truncated = true;
                                 slot.n_prompt_tokens = prompt_tokens.size();
 
@@ -3215,6 +3239,7 @@ struct server_context {
                                 GGML_ASSERT(slot.n_prompt_tokens < slot.n_ctx);
                             }
 
+                            // 如果启用了prompt缓存 (slot.params.cache_prompt)
                             if (slot.params.cache_prompt) {
                                 // reuse any previously computed tokens that are common with the new prompt
                                 slot.n_past = slot.cache_tokens.get_common_prefix(prompt_tokens);
@@ -3307,7 +3332,9 @@ struct server_context {
                         }
                     }
 
+                    // 保留KV缓存中的公共部分，移除不匹配的部分
                     // keep only the common part
+                    // 从 slot.n_past 到末尾 (-1) 的KV缓存被移除
                     if (!llama_kv_self_seq_rm(ctx, slot.id, slot.n_past, -1)) {
                         // could not partially delete (likely using a non-Transformer model)
                         llama_kv_self_seq_rm(ctx, slot.id, -1, -1);
@@ -3346,6 +3373,8 @@ struct server_context {
                         slot.n_prompt_tokens_processed += n_pos;
                     }
 
+                    // 将prompt的token添加到当前批处理中进行处理
+                    // 循环条件：已处理的token数小于prompt总token数，并且当前批处理的token数小于物理批处理大小
                     // add prompt tokens for processing in the current batch
                     while (slot.n_past < slot.n_prompt_tokens && batch.n_tokens < n_batch) {
                         // get next token to process
@@ -3366,8 +3395,10 @@ struct server_context {
 
                     // SLT_INF(slot, "new cache_tokens: %s\n", slot.cache_tokens.str().c_str());
 
+                    // 打印信息日志：prompt处理进度
                     SLT_INF(slot, "prompt processing progress, n_past = %d, n_tokens = %d, progress = %f\n", slot.n_past, batch.n_tokens, (float) slot.n_prompt_tokens_processed / slot.n_prompt_tokens);
 
+                    // 如果整个prompt都已处理完毕 (n_past 等于 prompt_tokens 总数)
                     // entire prompt has been processed
                     if (slot.n_past == slot.n_prompt_tokens) {
                         slot.state = SLOT_STATE_DONE_PROMPT;
@@ -3385,38 +3416,48 @@ struct server_context {
                             }
                         }
 
+                        // 只为prompt的最后一个token提取logits (用于预测下一个token)
                         // extract the logits only for the last token
                         batch.logits[batch.n_tokens - 1] = true;
 
-                        slot.n_decoded = 0;
+                        slot.n_decoded = 0; // 重置已解码（生成）的token数量
+                        // 记录该槽位在批处理中的索引 (指向prompt的最后一个token)
                         slot.i_batch   = batch.n_tokens - 1;
 
                         SLT_INF(slot, "prompt done, n_past = %d, n_tokens = %d\n", slot.n_past, batch.n_tokens);
                     }
                 }
 
+                // 如果批处理已满 (达到物理批处理大小 n_batch)
                 if (batch.n_tokens >= n_batch) {
-                    break;
+                    break;  // 停止向批处理中添加更多token
                 }
             }
         }
 
+        // 如果批处理中没有token (所有槽位都处理完了或都在等待)
         if (batch.n_tokens == 0) {
             SRV_WRN("%s", "no tokens to decode\n");
             return;
         }
 
+        // 调试日志：开始解码批处理
         SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
 
+        // 如果 slot_batched 非空 (意味着有槽位被成功批处理)
         if (slot_batched) {
+            // 确保我们处于正确的embedding模式 (根据第一个被批处理的槽位是否为非因果任务)
             // make sure we're in the right embedding mode
             llama_set_embeddings(ctx, slot_batched->is_non_causal());
+            // 应用LoRA适配器，每个批处理只需要应用一次 (基于第一个被批处理的槽位的LoRA设置)
             // apply lora, only need to do it once per batch
             common_set_adapter_lora(ctx, slot_batched->lora);
         }
 
+        // 判断是否为编码任务 (embedding 或 reranking)
         const bool do_encode = (params_base.embedding || params_base.reranking);
 
+        // 临时解决方法：填充批处理，使得 batch.n_tokens >= n_slots
         // pad the batch so that batch.n_tokens >= n_slots
         // TODO: temporary workaround for https://github.com/ggml-org/llama.cpp/issues/13689
         if (do_encode) {
@@ -3450,25 +3491,29 @@ struct server_context {
 
         // 批量推理执行
         // process the created batch of tokens
+        // 循环处理批处理中的token，每次处理 n_batch (物理批处理大小) 个token
         for (int32_t i = 0; i < batch.n_tokens; i = i_next) {
+            // 计算当前子批次要处理的token数量，不超过剩余token数或 n_batch
             const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
 
-            // 创建批次视图
+             // 创建一个批处理视图 (llama_batch_view)，指向大 batch 中的一个子集
             llama_batch batch_view = {
-                n_tokens,
-                batch.token    + i,
-                nullptr,
-                batch.pos      + i,
-                batch.n_seq_id + i,
-                batch.seq_id   + i,
-                batch.logits   + i,
+                n_tokens, // 当前子批次的token数量
+                batch.token    + i, // 指向当前子批次第一个token的ID
+                nullptr, // embeddings指针，这里为nullptr，表示使用token ID
+                batch.pos      + i, // 指向当前子批次第一个token的位置
+                batch.n_seq_id + i, // 指向当前子批次第一个token的序列ID数量数组
+                batch.seq_id   + i, // 指向当前子批次第一个token的序列ID数组
+                batch.logits   + i, // 指向当前子批次第一个token的logits标志位
             };
 
             // 执行实际的模型推理
             const int ret = llama_decode(ctx, batch_view);
 
+            // 更新性能指标：记录解码操作
             metrics.on_decoded(slots);
 
+            // 如果 llama_decode 返回非0值，表示解码出错
             if (ret != 0) {
                 {
                     std::string err;
@@ -3509,6 +3554,7 @@ struct server_context {
             // on successful decode, restore the original batch size
             n_batch = llama_n_batch(ctx);
 
+            // 解码成功后，处理每个槽位的输出
             for (auto & slot : slots) {
                 if (slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
                     continue; // continue loop of slots
@@ -3575,6 +3621,7 @@ struct server_context {
                 }
             }
 
+            // 执行推测解码 (Speculative Decoding)
             // do speculative decoding
             for (auto & slot : slots) {
                 if (!slot.is_processing() || !slot.can_speculate()) {

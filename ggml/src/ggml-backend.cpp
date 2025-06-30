@@ -874,6 +874,8 @@ static void ggml_backend_sched_set_if_supported(ggml_backend_sched_t sched, stru
     }
 }
 
+// 遍历整个计算图，为每一个计算节点（operation）和数据节点（tensor）决定一个最合适的计算后端，
+// 并在此基础上，将图切分成若干个可以在同一后端上连续执行的子图（sub-graph/split）
 // assigns backends to ops and splits the graph into subgraphs that can be computed on the same backend
 static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
     // reset splits
@@ -1597,15 +1599,22 @@ bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph *
     return true;
 }
 
+// 为调度器中的计算图分配内存
 bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+    // 确保调度器内部有足够的空间来记录图中每个节点的后端分配信息
     GGML_ASSERT((int)sched->hash_set.size >= graph->n_nodes + graph->n_leafs);
 
+    // 切分计算图，将原始的大计算图切分成多个小的子图
     ggml_backend_sched_split_graph(sched, graph);
 
+    // 为切分好的子图分配内存
+    // 在图被切分后，调度器知道了每个子图需要在哪个后端上运行，以及哪些数据需要在后端之间传递（需要创建副本）。
+    // 这个函数会真正地为所有子图的中间张量和跨后端的数据副本分配内存。
     if (!ggml_backend_sched_alloc_splits(sched)) {
         return false;
     }
 
+    // 标记调度器为“已分配”状态
     sched->is_alloc = true;
 
     return true;

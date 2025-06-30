@@ -705,13 +705,18 @@ bool llama_context::apply_adapter_cvec(
     return cvec.apply(model, data, len, n_embd, il_start, il_end);
 }
 
+// 构建、分配并执行代表了Transformer模型运算的计算图
 llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_state_i * mstate, ggml_status & ret) {
+    // 首先检查 mstate 指针是否有效
+    // 如果指针有效，就调用其 apply() 方法。这个方法的作用是应用或提交之前为这个 ubatch 规划好的内存操作。
+    // 例如，在 memory->init_batch() 中可能只是“预订”了 KV 缓存中的位置，而 apply() 则是实际执行这些位置的更新或分配，使其对即将开始的计算图可见
     if (mstate && !mstate->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory state\n", __func__);
         ret = GGML_STATUS_FAILED;
         return nullptr;
     }
 
+    // 调用 graph_init() 函数来初始化一个新的、空的计算图
     auto * gf = graph_init();
     if (!gf) {
         LLAMA_LOG_ERROR("%s: failed to initialize graph\n", __func__);
@@ -719,6 +724,7 @@ llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, 
         return nullptr;
     }
 
+    // 根据 ubatch 的内容，将 LLM 模型的所有运算（从 token 嵌入、多头注意力、前馈网络到最终的 logits 输出）逐一添加到 gf 这个计算图中
     auto res = graph_build(ctx_compute.get(), gf, ubatch, gtype, mstate);
     if (!res) {
         LLAMA_LOG_ERROR("%s: failed to build graph\n", __func__);
@@ -728,14 +734,18 @@ llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, 
 
     // LLAMA_LOG_INFO("graph build time: %.3f ms (%d nodes, %d leafs)\n", (ggml_time_us() - t_start_us)/1000.0, gf->n_nodes, gf->n_leafs);
 
+    // 一旦计算图 gf 的结构被定义好，这一步就是为它分配内存。
+    // 获取计算调度器（scheduler）。调度器知道计算将在哪个后端（CPU, GPU等）上运行
     if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
-        LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
+        LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);    
         ret = GGML_STATUS_ALLOC_FAILED;
         return nullptr;
     }
 
+    // 将计算图的输入与实际数据关联起来
     res->set_inputs(&ubatch);
 
+    // 执行计算图。这个函数会命令调度器按照图中定义的依赖关系，在后端（CPU/GPU）上执行所有计算节点。
     const auto status = graph_compute(gf, ubatch.n_tokens > 1);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
@@ -920,16 +930,20 @@ int llama_context::encode(llama_batch & inp_batch) {
 }
 
 int llama_context::decode(llama_batch & inp_batch) {
+    // 检查 memory 成员是否为空指针。在 llama.cpp 的较新版本中，memory 对象负责管理 KV 缓存
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
         return encode(inp_batch);
     }
 
+    // 如果输入的批次中 n_tokens（token 数量）为 0，则这是一个无效的输入
     if (inp_batch.n_tokens == 0) {
         LLAMA_LOG_ERROR("%s: n_tokens == 0\n", __func__);
         return -1;
     }
 
+    // 验证输入数据的一致性。pos 数组指定了每个 token 在其序列中的位置。seq_id 数组指定了每个 token 属于哪个序列。
+    // 如果 pos 没有被提供（NULL），那么 seq_id 也不应该被提供，因为没有位置信息的序列信息是无意义的。
     if (!inp_batch.pos) {
         if (inp_batch.seq_id) {
             LLAMA_LOG_ERROR("%s: pos == NULL, but seq_id != NULL\n", __func__);
@@ -937,11 +951,16 @@ int llama_context::decode(llama_batch & inp_batch) {
         }
     }
 
+    // 临时为输入批次分配内存
+    // 如果 inp_batch.pos 已经存在，则传入 -1，表示不需要 batch_allocr 分配新的位置数组。
+    // 如果 inp_batch.pos 不存在，则它会查询 memory 对象中序列 0 的最大位置，并在此基础上加 1，为当前批次生成连续的位置。这通常用于简单的、单个序列的文本生成。
     // temporary allocate memory for the input batch if needed
     llama_batch_allocr batch_allocr(inp_batch, inp_batch.pos ? -1 : memory->seq_pos_max(0) + 1);
 
+    // 创建一个对 batch_allocr 内部批次的常量引用
     const llama_batch & batch = batch_allocr.batch;
 
+    // 创建了一些常用变量的引用或副本
     const auto & vocab   = model.vocab;
     const auto & hparams = model.hparams;
 
@@ -950,8 +969,10 @@ int llama_context::decode(llama_batch & inp_batch) {
     const int64_t n_tokens_all = batch.n_tokens;
     const int64_t n_embd       = hparams.n_embd;
 
+    // 输入的批次要么包含 token ID，要么包含预先计算好的 embd（嵌入向量），但不能两者都包含，也不能两者都不包含。
     GGML_ASSERT((!batch.token && batch.embd) || (batch.token && !batch.embd)); // NOLINT
 
+    // 对输入的 token 数据进行验证
     // TODO: move the validation to the llama_batch_allocr
     if (batch.token) {
         for (int64_t i = 0; i < n_tokens_all; ++i) {
@@ -967,24 +988,29 @@ int llama_context::decode(llama_batch & inp_batch) {
         }
     }
 
+    // 批次中的 token 总数不超过在创建 llama_context 时设置的最大批处理大小（n_batch
     GGML_ASSERT(n_tokens_all <= cparams.n_batch);
 
+    // 如果不使用因果注意力（例如在某些分类任务中），那么微批次的大小（n_ubatch）必须至少等于整个批次的大小（n_tokens_all）。这是因为非因果注意力需要一次性看到所有 token
     GGML_ASSERT((cparams.causal_attn || cparams.n_ubatch >= n_tokens_all) && "non-causal attention requires n_ubatch >= n_tokens");
 
+    // 性能统计
     if (t_compute_start_us == 0) {
         t_compute_start_us = ggml_time_us();
     }
     n_queued_tokens += n_tokens_all;
 
+    // 判断当前解码任务是否是为了获取“池化嵌入”
     // this indicates we are doing pooled embedding, so we ignore batch.logits and output all tokens
     const bool embd_pooled = cparams.embeddings && cparams.pooling_type != LLAMA_POOLING_TYPE_NONE;
 
+    // 存储每个序列的池化嵌入结果。在处理新批次之前，清空上一次的结果。
     embd_seq.clear();
 
     int64_t n_outputs_all = 0;
 
+    // 计算整个批次中，总共有多少个 token 需要输出结果
     // count outputs
-    // 计算需要输出logits的token数量
     if (batch.logits && !embd_pooled) {
         for (uint32_t i = 0; i < n_tokens_all; ++i) {
             n_outputs_all += batch.logits[i] != 0;
@@ -996,34 +1022,45 @@ int llama_context::decode(llama_batch & inp_batch) {
         n_outputs_all = 1;
     }
 
+    // 记录是否已经尝试过优化 KV 缓存
     bool did_optimize = false;
 
+    // 调用 KV 缓存的更新函数。参数 false 表示这是一次常规的、非强制性的更新（例如，处理一些挂起的缓存移位操作）
     // handle any pending defrags/shifts
     kv_self_update(false);
 
     llama_memory_state_ptr mstate;
 
+    // 为当前批次在 KV 缓存中分配空间。由于 KV 缓存中可能存在碎片，一次分配不一定成功
     while (true) {
+        // 尝试在 memory（KV 缓存管理器）中为当前批次 batch 初始化内存状态。它会考虑微批次大小（n_ubatch）等参数
         mstate = memory->init_batch(batch, cparams.n_ubatch, embd_pooled, /* logits_all */ n_outputs_all == n_tokens_all);
         if (!mstate) {
             return -2;
         }
 
+        // 检查 init_batch 的结果状态
         switch (mstate->get_status()) {
+            // 成功分配，跳出 while 循环
             case LLAMA_MEMORY_STATUS_SUCCESS:
                 {
                 } break;
+            // 严重的内部错误，返回 -2。
             case LLAMA_MEMORY_STATUS_NO_UPDATE:
                 {
                     LLAMA_LOG_ERROR("%s: unexpected memory state status: %d\n", __func__, mstate->get_status());
 
                     return -2;
                 }
+            // 准备失败（通常是空间不足）
             case LLAMA_MEMORY_STATUS_FAILED_PREPARE:
                 {
+                    // 如果是第一次失败，则尝试优化
                     if (!did_optimize) {
                         did_optimize = true;
 
+                        // 调用 true 参数，强制进行 KV 缓存的碎片整理（defragmentation）
+                        // 如果优化成功，continue 会让 while 循环再次尝试 init_batch
                         if (kv_self_update(true)) {
                             LLAMA_LOG_DEBUG("%s: retrying batch size %d after cache optimization\n", __func__, batch.n_tokens);
 
@@ -1031,10 +1068,12 @@ int llama_context::decode(llama_batch & inp_batch) {
                         }
                     }
 
+                    // 如果优化后仍然失败，记录警告并返回 1，这个返回值通常告诉调用者批次太大，需要重试
                     LLAMA_LOG_WARN("%s: failed to find a memory slot for batch of size %d\n", __func__, batch.n_tokens);
 
                     return 1;
                 }
+            // 严重的内部错误，返回 -2。
             case LLAMA_MEMORY_STATUS_FAILED_COMPUTE:
                 {
                     LLAMA_LOG_ERROR("%s: compute failed while preparing batch of size %d\n", __func__, batch.n_tokens);
@@ -1046,6 +1085,7 @@ int llama_context::decode(llama_batch & inp_batch) {
         break;
     }
 
+    // 调用 output_reserve 函数，确保用于存储最终结果（logits 和 embeddings）的内部缓冲区足够大，能容纳 n_outputs_all 个 token 的输出。
     // reserve output buffer
     if (output_reserve(n_outputs_all) < n_outputs_all) {
         LLAMA_LOG_ERROR("%s: could not reserve space for batch with %" PRId64 " outputs\n", __func__, n_outputs_all);
@@ -1054,9 +1094,13 @@ int llama_context::decode(llama_batch & inp_batch) {
 
     int64_t n_outputs_prev = 0;
 
+    // 主要的计算循环
+    // 一个大的输入批次（batch）可能被 mstate 分割成多个微批次（ubatch）。这个 do-while 循环会依次处理每一个微批次
     do {
+        // 获取当前要处理的微批次
         const auto & ubatch = mstate->get_ubatch();
 
+        // 计算当前这个 ubatch 中有多少个 token 需要输出。
         // count the outputs in this u_batch
         {
             int32_t n_outputs_new = 0;
@@ -1074,13 +1118,19 @@ int llama_context::decode(llama_batch & inp_batch) {
             n_outputs = n_outputs_new;
         }
 
-        // 计算图构建与执行
+        // 重置计算调度器 sched，为构建新的计算图做准备
         ggml_backend_sched_reset(sched.get());
+        // 设置一个回调函数，可以在计算过程中被调用，用于一些高级功能（如早停）
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
         ggml_status status;
+        // 核心计算步骤
+        // 1. 根据 ubatch 的内容构建一个 GGML 计算图（computation graph）。这个图描述了从输入 token/embedding 到最终输出 logits/embedding 的所有数学运算。
+        // 2. 将这个计算图交给后端（CPU 或 GPU）执行
+        // 返回一个包含计算结果（指向输出张量 tensor 的指针）的对象。status 返回 GGML 的执行状态
         const auto res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mstate.get(), status);
 
+        // 如果 process_ubatch 失败 (res 为空)，这个代码块会被执行
         if (!res) {
             // the last ubatch failed or was aborted -> remove all positions of that ubatch from the KV cache
             llama_pos pos_min[LLAMA_MAX_PARALLEL_SEQUENCES];
@@ -1117,6 +1167,7 @@ int llama_context::decode(llama_batch & inp_batch) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
         // }
 
+        // 从计算结果 res 中获取指向输出张量（tensor）的指针。
         auto * t_logits = cparams.embeddings ? nullptr         : res->get_logits();
         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
 
@@ -1124,8 +1175,8 @@ int llama_context::decode(llama_batch & inp_batch) {
             t_embd = res->get_embd_pooled();
         }
 
+        // 如果计算出了 logits 并且当前微批次有需要输出的 token，则提取 logits
         // extract logits
-        // 提取 logits
         if (t_logits && n_outputs > 0) {
             // 从计算设备提取logits到主机内存
             ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched.get(), t_logits);
@@ -1137,12 +1188,13 @@ int llama_context::decode(llama_batch & inp_batch) {
             if (n_outputs) {
                 GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
                 GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits_size);
+                // 异步地将计算设备（如 GPU）上的 t_logits 张量数据复制回主机（CPU）的 logits 内存缓冲区
                 ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
             }
         }
 
+        // 如果计算出了 embeddings，则执行类似的操作，将 t_embd 张量的数据复制回主机内存。
         // extract embeddings
-        // 提取嵌入向量
         if (t_embd && n_outputs > 0) {
             ggml_backend_t backend_embd = ggml_backend_sched_get_tensor_backend(sched.get(), t_embd);
             GGML_ASSERT(backend_embd != nullptr);
@@ -1198,21 +1250,26 @@ int llama_context::decode(llama_batch & inp_batch) {
             }
         }
 
+        // 更新已处理的输出总数
         n_outputs_prev += n_outputs;
+    // mstate->next() 会准备下一个微批次。当所有微批次都处理完毕后，它会返回 false，循环结束。
     } while (mstate->next());
 
+    // 将上下文的 n_outputs 成员变量设置为批次的总输出数，以便 llama_get_logits_ith 等函数能够正确工作
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
     n_outputs = n_outputs_all;
 
+    // 对输出结果进行排序
     // set output mappings
     {
-        // 确保输出的顺序与用户提供的批次顺序一致。
         bool sorted_output = true;
 
+        // mstate 在处理过程中可能会对 token 的顺序进行优化和重排，以提高计算效率。out_ids 存储了原始 token 索引到计算后输出索引的映射。
         auto & out_ids = mstate->out_ids();
 
         GGML_ASSERT(out_ids.size() == (size_t) n_outputs_all);
 
+        // 循环建立 output_ids 映射，并检查输出是否已经被打乱（sorted_output）
         for (int64_t i = 0; i < n_outputs_all; ++i) {
             int64_t out_id = out_ids[i];
             output_ids[out_id] = i;
@@ -1221,6 +1278,7 @@ int llama_context::decode(llama_batch & inp_batch) {
             }
         }
 
+        // 如果顺序被打乱了，会使用一个选择排序算法（selection sort）来重新排列 logits 和 embd 数组
         // make the outputs have the same order they had in the user-provided batch
         // note: this is mostly relevant for recurrent models atm
         if (!sorted_output) {
@@ -1261,9 +1319,9 @@ int llama_context::decode(llama_batch & inp_batch) {
     // wait for the computation to finish (automatically done when obtaining the model output)
     //synchronize();
 
+    // 再次重置计算调度器，清理状态，为下一次 decode 调用做好准备
     // Reset state for the next token before backend sync, to allow the CPU activities in the reset to
     // overlap with device computation.
-    // 重置计算调度器，准备下一次计算
     ggml_backend_sched_reset(sched.get());
 
     return 0;
