@@ -1,15 +1,73 @@
 #include "ggml-moe.h"
 
+// C++ standard library headers
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>  // For system()
+#include <cstring>
 #include <exception>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <vector>
 
+// ggml internal headers
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 
 /**
+ * @struct MoeTopkCollector
+ * C++ implementation of the MoE TopK tensor data collector.
+ * This definition is hidden from C code.
+ */
+struct MoeTopkCollector {
+    std::vector<uint8_t> buffer;  // Temporary data buffer
+    std::string          output_dir = "moe_topk_data";
+    std::ofstream        metadata_file;
+    int                  tensor_counter = 0;
+    bool                 initialized    = false;
+
+    // Statistics
+    int    total_collected   = 0;
+    size_t total_bytes_saved = 0;
+
+    // Destructor to ensure metadata_file is closed
+    ~MoeTopkCollector() {
+        if (metadata_file.is_open()) {
+            metadata_file.close();
+        }
+    }
+};
+
+// C-compatible API implementations
+
+MoeTopkCollector * create_moe_topk_collector(void) {
+    return new (std::nothrow) MoeTopkCollector();
+}
+
+void destroy_moe_topk_collector(MoeTopkCollector * collector) {
+    if (!collector) {
+        return;
+    }
+    // Print final summary before destroying
+    print_collection_summary(collector);
+    delete collector;
+}
+
+// --- Helper function prototypes (internal to this file) ---
+
+static bool        is_target_tensor(const char * tensor_name);
+static std::string ggml_ne_string(const ggml_tensor * t);
+static bool        save_tensor_npy(const std::string & filepath, ggml_tensor * t, uint8_t * data);
+static void        save_metadata(MoeTopkCollector * collector, ggml_tensor * t, const std::string & filename);
+
+// --- Function Implementations ---
+
+/**
  * 检查张量名称是否匹配目标前缀
  */
-bool is_target_tensor(const char * tensor_name) {
+static bool is_target_tensor(const char * tensor_name) {
     if (!tensor_name) {
         return false;
     }
@@ -22,9 +80,12 @@ bool is_target_tensor(const char * tensor_name) {
 static std::string ggml_ne_string(const ggml_tensor * t) {
     std::string str;
     for (int i = 0; i < GGML_MAX_DIMS; ++i) {
-        str += std::to_string(t->ne[i]);
-        if (i + 1 < GGML_MAX_DIMS) {
-            str += ", ";
+        // 只添加存在的维度
+        if (t->ne[i] > 0) {
+            if (!str.empty()) {
+                str += ", ";
+            }
+            str += std::to_string(t->ne[i]);
         }
     }
     return str;
@@ -33,7 +94,7 @@ static std::string ggml_ne_string(const ggml_tensor * t) {
 /**
  * 保存张量为NPY格式文件
  */
-bool save_tensor_npy(const std::string & filepath, ggml_tensor * t, uint8_t * data) {
+static bool save_tensor_npy(const std::string & filepath, ggml_tensor * t, uint8_t * data) {
     std::ofstream file(filepath, std::ios::binary);
     if (!file) {
         GGML_LOG_ERROR("无法创建文件: %s\n", filepath.c_str());
@@ -124,7 +185,7 @@ bool save_tensor_npy(const std::string & filepath, ggml_tensor * t, uint8_t * da
 /**
  * 保存张量元数据到CSV文件
  */
-void save_metadata(MoeTopkCollector * collector, ggml_tensor * t, const std::string & filename) {
+static void save_metadata(MoeTopkCollector * collector, ggml_tensor * t, const std::string & filename) {
     if (!collector->metadata_file.is_open()) {
         std::string meta_path = collector->output_dir + "/metadata.csv";
         collector->metadata_file.open(meta_path);
@@ -146,9 +207,12 @@ void save_metadata(MoeTopkCollector * collector, ggml_tensor * t, const std::str
     }
 
     // 写入当前张量的元数据
-    collector->metadata_file << collector->tensor_counter << "," << "\"" << (t->name ? t->name : "unnamed") << "\","
-                             << "\"" << filename << "\"," << "\"" << ggml_ne_string(t) << "\"," << "\""
-                             << ggml_type_name(t->type) << "\"," << total_elements << "," << ggml_nbytes(t) << ","
+    collector->metadata_file << collector->tensor_counter << "," << "\"" << (t->name[0] != '\0' ? t->name : "unnamed")
+                             << "\","
+                             << "\"" << filename << "\","
+                             << "\"" << ggml_ne_string(t) << "\","
+                             << "\"" << ggml_type_name(t->type) << "\"," << total_elements << "," << ggml_nbytes(t)
+                             << ","
                              << "\"" << ggml_op_desc(t) << "\"\n";
 
     collector->metadata_file.flush();
@@ -205,7 +269,7 @@ bool moe_topk_collector_callback(struct ggml_tensor * t, bool ask, void * user_d
         // 构造文件名
         std::ostringstream filename_stream;
         filename_stream << std::setfill('0') << std::setw(4) << collector->tensor_counter << "_"
-                        << (t->name ? t->name : "unnamed") << ".npy";
+                        << (t->name[0] != '\0' ? t->name : "unnamed") << ".npy";
         std::string filename = filename_stream.str();
         std::string filepath = collector->output_dir + "/" + filename;
 
@@ -246,22 +310,30 @@ bool moe_topk_collector_callback(struct ggml_tensor * t, bool ask, void * user_d
 /**
  * 初始化MoE TopK数据收集器
  */
-bool init_moe_topk_collector(MoeTopkCollector * collector, const std::string & output_dir) {
-    collector->output_dir        = output_dir;
+bool init_moe_topk_collector(MoeTopkCollector * collector, const char * output_dir_c_str) {
+    if (!collector) {
+        return false;
+    }
+
+    collector->output_dir        = output_dir_c_str;
     collector->tensor_counter    = 0;
     collector->total_collected   = 0;
     collector->total_bytes_saved = 0;
+    collector->buffer.clear();
+    if (collector->metadata_file.is_open()) {
+        collector->metadata_file.close();
+    }
 
     // 创建输出目录
-    std::string mkdir_cmd = "mkdir -p " + output_dir;
+    std::string mkdir_cmd = "mkdir -p " + collector->output_dir;
     if (system(mkdir_cmd.c_str()) != 0) {
-        GGML_LOG_ERROR("无法创建输出目录: %s\n", output_dir.c_str());
+        GGML_LOG_ERROR("无法创建输出目录: %s\n", collector->output_dir.c_str());
         return false;
     }
 
     collector->initialized = true;
     GGML_LOG_INFO("🚀 MoE TopK数据收集器已初始化\n");
-    GGML_LOG_INFO("📁 输出目录: %s\n", output_dir.c_str());
+    GGML_LOG_INFO("📁 输出目录: %s\n", collector->output_dir.c_str());
     GGML_LOG_INFO("🎯 目标张量: ffn_moe_topk*\n");
 
     return true;
@@ -271,6 +343,9 @@ bool init_moe_topk_collector(MoeTopkCollector * collector, const std::string & o
  * 打印收集统计信息
  */
 void print_collection_summary(const MoeTopkCollector * collector) {
+    if (!collector) {
+        return;
+    }
     GGML_LOG_INFO("\n=== MoE TopK 数据收集报告 ===\n");
     GGML_LOG_INFO("收集的张量数量: %d\n", collector->total_collected);
     GGML_LOG_INFO("总数据大小: %.2f MB\n", collector->total_bytes_saved / 1024.0 / 1024.0);
@@ -295,16 +370,4 @@ void print_collection_summary(const MoeTopkCollector * collector) {
     }
 
     GGML_LOG_INFO("============================\n\n");
-}
-
-/**
- * 清理收集器资源并打印统计报告
- */
-void cleanup_moe_topk_collector(MoeTopkCollector * collector) {
-    if (collector->metadata_file.is_open()) {
-        collector->metadata_file.close();
-        GGML_LOG_INFO("📄 元数据文件已关闭\n");
-    }
-
-    print_collection_summary(collector);
 }

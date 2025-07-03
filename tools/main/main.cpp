@@ -5,6 +5,7 @@
 #include "sampling.h"
 #include "llama.h"
 #include "chat.h"
+#include "ggml-moe.h"
 
 #include <cstdio>
 #include <cstring>
@@ -85,6 +86,12 @@ static void sigint_handler(int signo) {
 #endif
 
 int main(int argc, char ** argv) {
+    MoeTopkCollector * moe_collector = NULL;
+    moe_collector = create_moe_topk_collector();
+    if (!init_moe_topk_collector(moe_collector, "moe_server_data")) {
+        fprintf(stderr, "Failed to initialize MoE collector\n");
+        return 1;
+    }
     // 解析命令行参数，这里会进行 ggml backend 的初始化
     common_params params;
     g_params = &params;
@@ -131,6 +138,8 @@ int main(int argc, char ** argv) {
     llama_backend_init();
     // numa 初始化
     llama_numa_init(params.numa);
+    params.cb_eval = moe_topk_collector_callback;
+    params.cb_eval_user_data = moe_collector;
 
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
@@ -1022,6 +1031,10 @@ int main(int argc, char ** argv) {
 
     ggml_threadpool_free_fn(threadpool);
     ggml_threadpool_free_fn(threadpool_batch);
+    
+    if (moe_collector) {
+        destroy_moe_topk_collector(moe_collector);
+    }
 
     return 0;
 }
