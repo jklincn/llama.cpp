@@ -52,3 +52,19 @@ class Timer {
     std::ostream &                 os_;
     std::chrono::time_point<clock> start_;
 };
+
+/*
+用法：
+    {
+        Timer t("load_all_data", "ms");
+        // load tensor data
+        // 加载张量数据
+        for (auto & it : ctx_bufs) {
+            ggml_context * ctx = it.first;
+            auto & bufs = it.second;
+            if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
+                return false;
+            }
+        }
+    }
+*/

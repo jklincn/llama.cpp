@@ -1067,7 +1067,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
         // 重置计算调度器 sched，为构建新的计算图做准备
         ggml_backend_sched_reset(sched.get());
-        // 设置一个回调函数，可以在计算过程中被调用，用于一些高级功能（如早停）
+        // 设置一个回调函数，可以在计算过程中被调用
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
         // 核心计算步骤

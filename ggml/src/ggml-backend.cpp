@@ -1433,14 +1433,16 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 return ec;
             }
         } else {
-            // 增量 / 按需路径（用户注册了 callback_eval）
+            // 如果定义了计算回调
             // similar to ggml_backend_compare_graph_backend
             for (int j0 = 0; j0 < split->graph.n_nodes; j0++) {
                 struct ggml_tensor * t = split->graph.nodes[j0];
 
+                // --- 1) 询问回调：对第 j0 个节点你要不要数据？(ask = true)
                 // check if the user needs data from this node
                 bool need = sched->callback_eval(t, true, sched->callback_eval_user_data);
 
+                // --- 2) 继续往后找，直到遇到下一个用户感兴趣的节点
                 int j1 = j0;
 
                 // determine the range [j0, j1] of nodes that can be computed together
@@ -1449,6 +1451,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     need = sched->callback_eval(t, true, sched->callback_eval_user_data);
                 }
 
+                // 此时 [j0, j1] 这段节点都不需要回调干涉，可打包一起算
                 struct ggml_cgraph gv = ggml_graph_view(&split->graph, j0, j1 + 1);
 
                 enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &gv);
@@ -1456,13 +1459,17 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     return ec;
                 }
 
+                // --- 3) 确保后端算完（GPU 上要 flush & copy 回显存）
                 // TODO: pass backend to the callback, then the user can decide if they want to synchronize
                 ggml_backend_synchronize(split_backend);
 
+                // --- 4) 如果 j1 这个节点用户确实想要数据，第二次调回调 (ask = false)
+                //        这时张量数据已在 host 可读内存，你可以拷贝 / 打印 / 保存
                 if (need && !sched->callback_eval(t, false, sched->callback_eval_user_data)) {
-                    break;
+                    break;  // 回调返回 false → 终止后续计算
                 }
 
+                // 下一轮从 j1+1 继续扫描
                 j0 = j1;
             }
         }
