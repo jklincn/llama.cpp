@@ -675,6 +675,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     // 计算分数
     // scores = sigmoid(logits)
+    // - qwen3_moe 使用 softmax
     ggml_tensor * probs = nullptr;
     switch (gating_op) {
         case LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX:

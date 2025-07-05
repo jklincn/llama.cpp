@@ -513,6 +513,9 @@ extern "C" {
     LLAMA_API int32_t llama_model_n_ctx_train(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_embd     (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_layer    (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_expert    (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_expert_used    (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_expert_shared  (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head     (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv  (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_swa      (const struct llama_model * model);

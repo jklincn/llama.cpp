@@ -3,12 +3,13 @@
 // C++ standard library headers
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>  // For system()
+#include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <fstream>
-#include <iomanip>
-#include <sstream>
+#include <iostream>
+#include <regex>  // 用于从张量名称中解析层索引
 #include <string>
 #include <vector>
 
@@ -17,56 +18,66 @@
 #include "ggml-impl.h"
 
 /**
- * @struct MoeTopkCollector
- * C++ implementation of the MoE TopK tensor data collector.
- * This definition is hidden from C code.
+ * @struct MoeActivationCounter
+ * 用于收集和统计MoE模型中专家激活次数的C++实现。
+ * 此定义对C代码隐藏。
  */
-struct MoeTopkCollector {
-    std::vector<uint8_t> buffer;  // Temporary data buffer
-    std::string          output_dir = "moe_topk_data";
-    std::ofstream        metadata_file;
-    int                  tensor_counter = 0;
-    bool                 initialized    = false;
+struct MoeActivationCounter {
+    // 配置
+    int num_layers  = 0;
+    int num_experts = 0;
 
-    // Statistics
-    int    total_collected   = 0;
-    size_t total_bytes_saved = 0;
+    // 内存中的激活计数器
+    // 结构: expert_activation_counts[layer_index][expert_index]
+    std::vector<std::vector<int>> expert_activation_counts;
 
-    // Destructor to ensure metadata_file is closed
-    ~MoeTopkCollector() {
-        if (metadata_file.is_open()) {
-            metadata_file.close();
-        }
-    }
+    // 用于从GPU复制数据的临时缓冲区
+    std::vector<uint8_t> buffer;
+
+    bool initialized = false;
+
+    MoeActivationCounter()  = default;
+    ~MoeActivationCounter() = default;
 };
 
 // C-compatible API implementations
 
-MoeTopkCollector * create_moe_topk_collector(void) {
-    return new (std::nothrow) MoeTopkCollector();
+MoeActivationCounter * create_moe_activation_counter() {
+    auto * counter = new (std::nothrow) MoeActivationCounter();
+    if (!counter) {
+        GGML_LOG_ERROR("无法分配 MoeActivationCounter 对象。\n");
+    }
+    return counter;
 }
 
-void destroy_moe_topk_collector(MoeTopkCollector * collector) {
-    if (!collector) {
-        return;
+bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, int experts, int expert_used) {
+    if (!counter) {
+        return false;
     }
-    // Print final summary before destroying
-    print_collection_summary(collector);
-    delete collector;
+    if (layers <= 0 || experts <= 0) {
+        GGML_LOG_ERROR("setup_moe_activation_counter: 层数和专家数必须为正数。\n");
+        return false;
+    }
+    counter->num_layers  = layers;
+    counter->num_experts = experts;
+    counter->expert_activation_counts.assign(layers, std::vector<int>(experts, 0));
+    counter->initialized = true;
+    GGML_LOG_INFO("🚀 MoE激活计数器已初始化 (模型层数: %d 层, 每层专家数量: %d, 激活专家数: %d)\n", layers, experts,
+                  expert_used);
+    return true;
+}
+
+void destroy_moe_activation_counter(MoeActivationCounter * counter) {
+    delete counter;
 }
 
 // --- Helper function prototypes (internal to this file) ---
 
-static bool        is_target_tensor(const char * tensor_name);
-static std::string ggml_ne_string(const ggml_tensor * t);
-static bool        save_tensor_npy(const std::string & filepath, ggml_tensor * t, uint8_t * data);
-static void        save_metadata(MoeTopkCollector * collector, ggml_tensor * t, const std::string & filename);
+static bool is_target_tensor(const char * tensor_name);
+static int  parse_layer_index_from_name(const char * tensor_name);
 
 // --- Function Implementations ---
 
-/**
- * 检查张量名称是否匹配目标前缀
- */
 static bool is_target_tensor(const char * tensor_name) {
     if (!tensor_name) {
         return false;
@@ -75,299 +86,128 @@ static bool is_target_tensor(const char * tensor_name) {
 }
 
 /**
- * 获取张量维度字符串（实现版本）
+ * 从张量名称中解析出层索引。
+ * 假设张量名称格式为 "blk.XX.*" 或 "layers.XX.*"，其中 XX 是数字。
  */
-static std::string ggml_ne_string(const ggml_tensor * t) {
-    std::string str;
-    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
-        // 只添加存在的维度
-        if (t->ne[i] > 0) {
-            if (!str.empty()) {
-                str += ", ";
-            }
-            str += std::to_string(t->ne[i]);
-        }
-    }
-    return str;
-}
-
-/**
- * 保存张量为NPY格式文件
- */
-static bool save_tensor_npy(const std::string & filepath, ggml_tensor * t, uint8_t * data) {
-    std::ofstream file(filepath, std::ios::binary);
-    if (!file) {
-        GGML_LOG_ERROR("无法创建文件: %s\n", filepath.c_str());
-        return false;
-    }
-
+static int parse_layer_index_from_name(const char * tensor_name) {
     try {
-        // NPY文件头：魔数 + 版本
-        file.write("\x93NUMPY", 6);
-        file.write("\x01\x00", 2);  // 版本 1.0
-
-        // 构造数据类型字符串
-        std::string dtype;
-        switch (t->type) {
-            case GGML_TYPE_F32:
-                dtype = "'<f4'";
-                break;
-            case GGML_TYPE_F16:
-                dtype = "'<f2'";
-                break;
-            case GGML_TYPE_I64:
-                dtype = "'<i8'";
-                break;
-            case GGML_TYPE_I32:
-                dtype = "'<i4'";
-                break;
-            case GGML_TYPE_I16:
-                dtype = "'<i2'";
-                break;
-            case GGML_TYPE_I8:
-                dtype = "'<i1'";
-                break;
-            default:
-                GGML_LOG_ERROR("不支持的数据类型: %s\n", ggml_type_name(t->type));
-                return false;
+        // 使用正则表达式查找第一个出现的数字序列
+        std::regex  re("\\d+");
+        std::smatch match;
+        std::string s(tensor_name);
+        if (std::regex_search(s, match, re)) {
+            return std::stoi(match.str(0));
         }
-
-        // 构造shape字符串
-        std::ostringstream shape_stream;
-        shape_stream << "(";
-        bool first = true;
-        for (int i = 0; i < GGML_MAX_DIMS; ++i) {
-            if (t->ne[i] > 1 || (i == 0 && first)) {
-                if (!first) {
-                    shape_stream << ", ";
-                }
-                shape_stream << t->ne[i];
-                first = false;
-            }
-        }
-        if (!first) {
-            shape_stream << ",";  // Python tuple需要逗号
-        }
-        shape_stream << ")";
-
-        // 构造完整的头部
-        std::ostringstream header_stream;
-        header_stream << "{'descr': " << dtype << ", 'fortran_order': False" << ", 'shape': " << shape_stream.str()
-                      << ", }";
-
-        std::string header = header_stream.str();
-
-        // 计算填充，使头部总长度对齐到16字节
-        size_t total_header_size = 8 + 2 + header.size() + 1;  // 魔数+版本+头长度+头内容+换行
-        size_t padding           = (16 - (total_header_size % 16)) % 16;
-        header += std::string(padding, ' ') + "\n";
-
-        // 写入头部长度
-        uint16_t header_len = header.size();
-        file.write(reinterpret_cast<const char *>(&header_len), 2);
-
-        // 写入头部内容
-        file.write(header.c_str(), header.size());
-
-        // 写入张量数据
-        size_t data_size = ggml_nbytes(t);
-        file.write(reinterpret_cast<const char *>(data), data_size);
-
-        file.close();
-        return file.good();
-
     } catch (const std::exception & e) {
-        GGML_LOG_ERROR("保存NPY文件时出错: %s\n", e.what());
-        return false;
+        GGML_LOG_ERROR("%s: 解析层索引失败: %s\n", __func__, e.what());
     }
+    GGML_LOG_WARN("%s: 无法从 '%s' 中解析层索引。\n", __func__, tensor_name);
+    return -1;
 }
 
 /**
- * 保存张量元数据到CSV文件
+ * MoE 专家激活计数回调函数
  */
-static void save_metadata(MoeTopkCollector * collector, ggml_tensor * t, const std::string & filename) {
-    if (!collector->metadata_file.is_open()) {
-        std::string meta_path = collector->output_dir + "/metadata.csv";
-        collector->metadata_file.open(meta_path);
-        if (!collector->metadata_file.is_open()) {
-            GGML_LOG_ERROR("无法创建元数据文件: %s\n", meta_path.c_str());
-            return;
-        }
-
-        // 写入CSV头部
-        collector->metadata_file << "序号,张量名称,文件名,形状,数据类型,元素数量,字节大小,操作类型\n";
-    }
-
-    // 计算元素总数
-    size_t total_elements = 1;
-    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
-        if (t->ne[i] > 1 || i == 0) {
-            total_elements *= t->ne[i];
-        }
-    }
-
-    // 写入当前张量的元数据
-    collector->metadata_file << collector->tensor_counter << "," << "\"" << (t->name[0] != '\0' ? t->name : "unnamed")
-                             << "\","
-                             << "\"" << filename << "\","
-                             << "\"" << ggml_ne_string(t) << "\","
-                             << "\"" << ggml_type_name(t->type) << "\"," << total_elements << "," << ggml_nbytes(t)
-                             << ","
-                             << "\"" << ggml_op_desc(t) << "\"\n";
-
-    collector->metadata_file.flush();
-}
-
-/**
- * MoE TopK张量采集回调函数
- */
-bool moe_topk_collector_callback(struct ggml_tensor * t, bool ask, void * user_data) {
-    auto * collector = (MoeTopkCollector *) user_data;
+bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * user_data) {
+    auto * counter = (MoeActivationCounter *) user_data;
 
     if (ask) {
-        // 只对目标张量感兴趣
+        // 第一阶段：询问是否对该张量感兴趣
         return is_target_tensor(t->name);
     }
 
-    // 再次确认是否为目标张量（双重检查）
-    if (!is_target_tensor(t->name)) {
+    // 第二阶段：处理感兴趣的张量数据
+    // GGML_LOG_INFO("🎯 [MoE Counter] 捕获到目标张量: %s\n", t->name);
+
+    // 1. 解析层索引
+    int layer_idx = parse_layer_index_from_name(t->name);
+    if (layer_idx < 0 || layer_idx >= counter->num_layers) {
+        GGML_LOG_ERROR("❌ 从 '%s' 解析到无效的层索引 %d。\n", t->name, layer_idx);
+        return true;  // 继续执行
+    }
+
+    // 2. 验证张量类型 (我们期望的是包含专家索引的I32张量)
+    if (t->type != GGML_TYPE_I32) {
+        GGML_LOG_WARN("⚠️  跳过张量 '%s'，因为其类型不是 I32 (而是 %s)，无法解析为专家索引。\n", t->name,
+                      ggml_type_name(t->type));
         return true;
     }
 
-    const struct ggml_tensor * src0 = t->src[0];
-    const struct ggml_tensor * src1 = t->src[1];
+    // 3. 获取张量数据 (如果需要，从GPU复制到CPU)
+    uint8_t *    data_ptr = nullptr;
+    const size_t n_bytes  = ggml_nbytes(t);
 
-    // 输出基本信息
-    char src1_str[128] = { 0 };
-    if (src1) {
-        snprintf(src1_str, sizeof(src1_str), "%s{%s}", src1->name, ggml_ne_string(src1).c_str());
-    }
-
-    GGML_LOG_INFO("🎯 [MoE TopK] %s: %s = (%s) %s(%s{%s}, %s}) = {%s}\n", __func__, t->name, ggml_type_name(t->type),
-                  ggml_op_desc(t), src0->name, ggml_ne_string(src0).c_str(), src1 ? src1_str : "",
-                  ggml_ne_string(t).c_str());
-
-    // 处理数据获取（GPU -> CPU 如果需要）
-    const bool is_host  = ggml_backend_buffer_is_host(t->buffer);
-    uint8_t *  data_ptr = nullptr;
-
-    if (!is_host) {
-        // 从GPU复制数据到CPU
-        size_t n_bytes = ggml_nbytes(t);
-        collector->buffer.resize(n_bytes);
-        ggml_backend_tensor_get(t, collector->buffer.data(), 0, n_bytes);
-        data_ptr = collector->buffer.data();
-        GGML_LOG_INFO("📥 从GPU复制了 %zu 字节数据\n", n_bytes);
+    if (!ggml_backend_buffer_is_host(t->buffer)) {
+        counter->buffer.resize(n_bytes);
+        ggml_backend_tensor_get(t, counter->buffer.data(), 0, n_bytes);
+        data_ptr = counter->buffer.data();
     } else {
-        // 数据已经在CPU上
         data_ptr = (uint8_t *) t->data;
-        GGML_LOG_INFO("📋 数据已在CPU内存中\n");
     }
 
-    // 只处理非量化张量
-    if (!ggml_is_quantized(t->type)) {
-        // 构造文件名
-        std::ostringstream filename_stream;
-        filename_stream << std::setfill('0') << std::setw(4) << collector->tensor_counter << "_"
-                        << (t->name[0] != '\0' ? t->name : "unnamed") << ".npy";
-        std::string filename = filename_stream.str();
-        std::string filepath = collector->output_dir + "/" + filename;
+    // 4. 遍历数据并更新计数器
+    const int32_t * expert_indices = (const int32_t *) data_ptr;
+    const size_t    num_indices    = ggml_nelements(t);
 
-        // 保存NPY文件
-        if (save_tensor_npy(filepath, t, data_ptr)) {
-            size_t file_size = ggml_nbytes(t);
-            collector->total_bytes_saved += file_size;
-            collector->total_collected++;
-
-            GGML_LOG_INFO("💾 已保存: %s (%.2f KB)\n", filename.c_str(), file_size / 1024.0);
-
-            // 保存元数据
-            save_metadata(collector, t, filename);
-
-            // 显示一些基本统计信息
-            size_t total_elements = 1;
-            for (int i = 0; i < GGML_MAX_DIMS; ++i) {
-                if (t->ne[i] > 1 || i == 0) {
-                    total_elements *= t->ne[i];
-                }
-            }
-
-            GGML_LOG_INFO("📊 张量统计: %zu个元素, 形状=%s, 类型=%s\n", total_elements, ggml_ne_string(t).c_str(),
-                          ggml_type_name(t->type));
-
+    int updated_count = 0;
+    for (size_t i = 0; i < num_indices; ++i) {
+        const int32_t expert_idx = expert_indices[i];
+        if (expert_idx >= 0 && expert_idx < counter->num_experts) {
+            counter->expert_activation_counts[layer_idx][expert_idx]++;
+            updated_count++;
         } else {
-            GGML_LOG_ERROR("❌ 保存失败: %s\n", filepath.c_str());
+            GGML_LOG_ERROR("❌ 在张量 '%s' 中发现无效的专家索引 %d。\n", t->name, expert_idx);
         }
-
-        collector->tensor_counter++;
-    } else {
-        GGML_LOG_INFO("⚠️  跳过量化张量: %s (类型: %s)\n", t->name, ggml_type_name(t->type));
     }
+
+    // GGML_LOG_INFO("📊 [层 %2d] 已处理 %zu 个专家激活，成功更新 %d 个计数。\n", layer_idx, num_indices, updated_count);
 
     return true;
 }
 
 /**
- * 初始化MoE TopK数据收集器
+ * 将收集到的激活次数统计数据保存到CSV文件中。
  */
-bool init_moe_topk_collector(MoeTopkCollector * collector, const char * output_dir_c_str) {
-    if (!collector) {
-        return false;
-    }
-
-    collector->output_dir        = output_dir_c_str;
-    collector->tensor_counter    = 0;
-    collector->total_collected   = 0;
-    collector->total_bytes_saved = 0;
-    collector->buffer.clear();
-    if (collector->metadata_file.is_open()) {
-        collector->metadata_file.close();
-    }
-
-    // 创建输出目录
-    std::string mkdir_cmd = "mkdir -p " + collector->output_dir;
-    if (system(mkdir_cmd.c_str()) != 0) {
-        GGML_LOG_ERROR("无法创建输出目录: %s\n", collector->output_dir.c_str());
-        return false;
-    }
-
-    collector->initialized = true;
-    GGML_LOG_INFO("🚀 MoE TopK数据收集器已初始化\n");
-    GGML_LOG_INFO("📁 输出目录: %s\n", collector->output_dir.c_str());
-    GGML_LOG_INFO("🎯 目标张量: ffn_moe_topk*\n");
-
-    return true;
-}
-
-/**
- * 打印收集统计信息
- */
-void print_collection_summary(const MoeTopkCollector * collector) {
-    if (!collector) {
+void save_activation_report(const MoeActivationCounter * counter) {
+    if (!counter || !counter->initialized) {
+        GGML_LOG_ERROR("%s: 计数器未初始化。\n", __func__);
         return;
     }
-    GGML_LOG_INFO("\n=== MoE TopK 数据收集报告 ===\n");
-    GGML_LOG_INFO("收集的张量数量: %d\n", collector->total_collected);
-    GGML_LOG_INFO("总数据大小: %.2f MB\n", collector->total_bytes_saved / 1024.0 / 1024.0);
-    GGML_LOG_INFO("平均张量大小: %.2f KB\n", collector->total_collected > 0 ?
-                                                 (collector->total_bytes_saved / 1024.0 / collector->total_collected) :
-                                                 0);
-    GGML_LOG_INFO("数据保存路径: %s/\n", collector->output_dir.c_str());
-    GGML_LOG_INFO("元数据文件: %s/metadata.csv\n", collector->output_dir.c_str());
 
-    if (collector->total_collected > 0) {
-        GGML_LOG_INFO("\n💡 使用Python分析数据:\n");
-        GGML_LOG_INFO("   import numpy as np\n");
-        GGML_LOG_INFO("   import pandas as pd\n");
-        GGML_LOG_INFO("   \n");
-        GGML_LOG_INFO("   # 加载元数据\n");
-        GGML_LOG_INFO("   metadata = pd.read_csv('%s/metadata.csv')\n", collector->output_dir.c_str());
-        GGML_LOG_INFO("   print(metadata)\n");
-        GGML_LOG_INFO("   \n");
-        GGML_LOG_INFO("   # 加载第一个张量\n");
-        GGML_LOG_INFO("   first_tensor = np.load('%s/' + metadata.iloc[0]['文件名'])\n", collector->output_dir.c_str());
-        GGML_LOG_INFO("   print(f'Shape: {first_tensor.shape}, Data: {first_tensor}')\n");
+    const std::string filepath = "expert_activations.csv";
+
+    std::ofstream file(filepath);
+    if (!file.is_open()) {
+        GGML_LOG_ERROR("%s: 无法创建报告文件: %s\n", __func__, filepath.c_str());
+        return;
     }
 
-    GGML_LOG_INFO("============================\n\n");
+    GGML_LOG_INFO("\n=== MoE 激活次数统计报告 ===\n");
+    GGML_LOG_INFO("正在保存报告到: %s\n", filepath.c_str());
+
+    // 写入CSV表头
+    file << "layer_index";
+    for (int i = 0; i < counter->num_experts; ++i) {
+        file << ",expert_" << i;
+    }
+    file << "\n";
+
+    // 写入数据
+    long long total_activations = 0;
+    for (int layer = 0; layer < counter->num_layers; ++layer) {
+        file << layer;
+        for (int expert = 0; expert < counter->num_experts; ++expert) {
+            int cnt = counter->expert_activation_counts[layer][expert];
+            file << "," << cnt;
+            total_activations += cnt;
+        }
+        file << "\n";
+    }
+
+    file.close();
+
+    GGML_LOG_INFO("✅ 报告保存成功。\n");
+    GGML_LOG_INFO("总计 %d 层, %d 个专家/层。\n", counter->num_layers, counter->num_experts);
+    GGML_LOG_INFO("在本次推理中，总共记录到 %lld 次专家激活。\n", total_activations);
+    GGML_LOG_INFO("==============================\n\n");
 }

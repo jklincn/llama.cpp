@@ -86,12 +86,6 @@ static void sigint_handler(int signo) {
 #endif
 
 int main(int argc, char ** argv) {
-    MoeTopkCollector * moe_collector = NULL;
-    moe_collector = create_moe_topk_collector();
-    if (!init_moe_topk_collector(moe_collector, "moe_server_data")) {
-        fprintf(stderr, "Failed to initialize MoE collector\n");
-        return 1;
-    }
     // 解析命令行参数，这里会进行 ggml backend 的初始化
     common_params params;
     g_params = &params;
@@ -138,8 +132,10 @@ int main(int argc, char ** argv) {
     llama_backend_init();
     // numa 初始化
     llama_numa_init(params.numa);
-    params.cb_eval = moe_topk_collector_callback;
-    params.cb_eval_user_data = moe_collector;
+
+    MoeActivationCounter* moe_counter = create_moe_activation_counter();;
+    params.cb_eval = moe_activation_counter_callback;
+    params.cb_eval_user_data = moe_counter;
 
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
@@ -163,6 +159,14 @@ int main(int argc, char ** argv) {
 
     if (model == NULL) {
         LOG_ERR("%s: error: unable to load model\n", __func__);
+        return 1;
+    }
+
+    const int n_layer = llama_model_n_layer(model);
+    const int n_expert = llama_model_n_expert(model);
+    const int n_expert_used = llama_model_n_expert_used(model);
+    if (!setup_moe_activation_counter(moe_counter, n_layer, n_expert, n_expert_used)) {
+        fprintf(stderr, "Failed to initialize MoE activation counter.\n");
         return 1;
     }
 
@@ -1032,9 +1036,7 @@ int main(int argc, char ** argv) {
     ggml_threadpool_free_fn(threadpool);
     ggml_threadpool_free_fn(threadpool_batch);
     
-    if (moe_collector) {
-        destroy_moe_topk_collector(moe_collector);
-    }
-
+    save_activation_report(moe_counter);
+    destroy_moe_activation_counter(moe_counter);
     return 0;
 }

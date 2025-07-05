@@ -1,8 +1,8 @@
 #pragma once
 
 // 只包含C兼容的头文件
-#include <stdbool.h>  // for bool
-#include <stddef.h>   // for size_t
+#include <stdbool.h> // for bool
+#include <stddef.h>  // for size_t
 
 #include "ggml.h"
 
@@ -10,62 +10,60 @@
 extern "C" {
 #endif
 
-// 前向声明 - 需要包含相应的GGML/Llama头文件
+// 前向声明 ggml_tensor 结构体
 struct ggml_tensor;
 
 /**
- * @struct MoeTopkCollector
- * MoE TopK 张量数据采集器 (不透明结构体)
+ * @struct MoeActivationCounter
+ * MoE 专家激活次数计数器 (不透明结构体)
  *
- * 这是一个不透明的指针，其实现细节隐藏在C++源文件中。
- * 使用 create_moe_topk_collector() 来创建实例，
- * 使用 destroy_moe_topk_collector() 来释放实例。
+ * 这是一个不透明的指针，其C++实现细节被隐藏。
+ * 使用 create_moe_activation_counter() 来创建实例，
+ * 使用 destroy_moe_activation_counter() 来释放实例。
  */
-struct MoeTopkCollector;
-typedef struct MoeTopkCollector MoeTopkCollector;
+struct MoeActivationCounter;
+typedef struct MoeActivationCounter MoeActivationCounter;
 
 /**
- * 创建一个新的 MoE TopK 收集器实例
- *
- * @return 指向新创建的收集器实例的指针，如果失败则返回NULL。
- *         使用完毕后，必须调用 destroy_moe_topk_collector() 来释放内存。
+ * @brief 创建一个新的 MoE 专家激活计数器实例。
  */
-MoeTopkCollector * create_moe_topk_collector(void);
+MoeActivationCounter * create_moe_activation_counter();
+
+
+bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, int experts, int expert_used);
+
 
 /**
- * 销毁 MoE TopK 收集器实例并释放所有相关资源
+ * @brief 销毁 MoE 激活计数器实例并释放所有相关资源。
  *
- * @param collector 指向要销毁的收集器实例的指针。
+ * @param counter 指向要销毁的计数器实例的指针。
  */
-void destroy_moe_topk_collector(MoeTopkCollector * collector);
+void destroy_moe_activation_counter(MoeActivationCounter * counter);
 
 /**
- * 初始化MoE TopK数据收集器
+ * @brief MoE 专家激活计数回调函数。
  *
- * @param collector 收集器实例指针
- * @param output_dir 输出目录路径 (C 字符串)
- * @return true 如果初始化成功
+ * 这是核心的回调函数，应通过 ggml_set_debug_callback() 设置，
+ * 它会在计算图执行期间被GGML调度器调用。
+ *
+ * @param t 当前正在处理的ggml_tensor。
+ * @param ask 如果为 true，表示GGML在询问是否对该张量感兴趣。
+ * 如果为 false，表示正在处理一个先前已标记为感兴趣的张量。
+ * @param user_data 用户数据指针（应指向 MoeActivationCounter 实例）。
+ * @return 应该始终返回 true 以继续图的计算。
  */
-bool init_moe_topk_collector(MoeTopkCollector * collector, const char * output_dir);
+bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * user_data);
 
 /**
- * MoE TopK张量采集回调函数
+ * @brief 将收集到的激活次数统计数据保存到一个CSV报告文件中。
  *
- * 这是核心的回调函数，会被GGML调度器调用
+ * 这个函数应该在整个推理过程完全结束后调用一次，以生成最终的报告。
  *
- * @param t 当前张量
- * @param ask 询问阶段标志
- * @param user_data 用户数据指针（应指向 MoeTopkCollector 实例）
- * @return true 继续执行，false 停止执行
+ * @param counter 包含累计激活数据的计数器实例指针。
+ * @param output_dir 一个C字符串，指定用于存放报告文件的目录路径。
  */
-bool moe_topk_collector_callback(struct ggml_tensor * t, bool ask, void * user_data);
+void save_activation_report(const MoeActivationCounter * counter);
 
-/**
- * 打印收集统计信息
- *
- * @param collector 收集器实例指针
- */
-void print_collection_summary(const MoeTopkCollector * collector);
 
 #ifdef __cplusplus
 }

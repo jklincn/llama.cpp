@@ -15046,6 +15046,18 @@ int32_t llama_model_n_layer(const llama_model * model) {
     return model->hparams.n_layer;
 }
 
+int32_t llama_model_n_expert(const llama_model * model) {
+    return model->hparams.n_expert;
+}
+
+int32_t llama_model_n_expert_used(const llama_model * model) {
+    return model->hparams.n_expert_used;
+}
+
+int32_t llama_model_n_expert_shared(const llama_model * model) {
+    return model->hparams.n_expert_shared;
+}
+
 int32_t llama_model_n_head(const llama_model * model) {
     return model->hparams.n_head();
 }
