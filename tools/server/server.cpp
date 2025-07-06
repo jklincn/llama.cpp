@@ -10,7 +10,7 @@
 #include "speculative.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
-
+#include "ggml-moe.h"
 // mime type for sending response
 #define MIMETYPE_JSON "application/json; charset=utf-8"
 
@@ -1974,7 +1974,7 @@ struct server_context {
         llama_batch_free(batch);
     }
 
-    bool load_model(const common_params & params) {
+    bool load_model(const common_params & params, llama_model_ptr & model_ptr) {
         SRV_INF("loading model '%s'\n", params.model.path.c_str());
 
         params_base = params;
@@ -1982,6 +1982,7 @@ struct server_context {
         llama_init = common_init_from_params(params_base);
 
         model = llama_init.model.get();
+        model_ptr = llama_model_ptr(model);
         ctx   = llama_init.context.get();
 
         if (model == nullptr) {
@@ -3781,6 +3782,10 @@ int main(int argc, char ** argv) {
     llama_backend_init();
     llama_numa_init(params.numa);
 
+    MoeActivationCounter* moe_counter = create_moe_activation_counter();
+    params.cb_eval = moe_activation_counter_callback;
+    params.cb_eval_user_data = moe_counter;
+
     LOG_INF("system info: n_threads = %d, n_threads_batch = %d, total_threads = %d\n", params.cpuparams.n_threads, params.cpuparams_batch.n_threads, std::thread::hardware_concurrency());
     LOG_INF("\n");
     LOG_INF("%s\n", common_params_get_system_info(params).c_str());
@@ -5025,12 +5030,20 @@ int main(int argc, char ** argv) {
     LOG_INF("%s: HTTP server is listening, hostname: %s, port: %d, http threads: %d\n", __func__, params.hostname.c_str(), params.port, params.n_threads_http);
 
     // load the model
+    llama_model_ptr model_ptr = nullptr;
     LOG_INF("%s: loading model\n", __func__);
-
-    if (!ctx_server.load_model(params)) {
+    if (!ctx_server.load_model(params,model_ptr)) {
         clean_up();
         t.join();
         LOG_ERR("%s: exiting due to model loading error\n", __func__);
+        return 1;
+    }
+
+    const int n_layer = llama_model_n_layer(model_ptr.get());
+    const int n_expert = llama_model_n_expert(model_ptr.get());
+    const int n_expert_used = llama_model_n_expert_used(model_ptr.get());
+    if (!setup_moe_activation_counter(moe_counter, n_layer, n_expert, n_expert_used)) {
+        fprintf(stderr, "Failed to initialize MoE activation counter.\n");
         return 1;
     }
 
@@ -5057,6 +5070,8 @@ int main(int argc, char ** argv) {
     shutdown_handler = [&](int) {
         // this will unblock start_loop()
         ctx_server.queue_tasks.terminate();
+        save_activation_report(moe_counter);
+        destroy_moe_activation_counter(moe_counter);
     };
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))

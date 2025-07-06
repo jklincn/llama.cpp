@@ -133,7 +133,7 @@ int main(int argc, char ** argv) {
     // numa 初始化
     llama_numa_init(params.numa);
 
-    MoeActivationCounter* moe_counter = create_moe_activation_counter();;
+    MoeActivationCounter* moe_counter = create_moe_activation_counter();
     params.cb_eval = moe_activation_counter_callback;
     params.cb_eval_user_data = moe_counter;
 
