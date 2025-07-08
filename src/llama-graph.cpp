@@ -674,12 +674,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
 
-    // logits = gate(x)
+    // 计算门控 logits
+    // logits = gate_inp * cur
+    // 输入: gate_inp [n_expert, n_embd], cur [n_embd, n_tokens]
+    // 输出: logits [n_expert, n_tokens]
     ggml_tensor * logits = build_lora_mm(gate_inp, cur); // [n_expert, n_tokens]
     cb(logits, "ffn_moe_logits", il);
 
-    // 计算分数
-    // scores = sigmoid(logits)
+    // 计算专家概率
+    // probs = softmax(logits) 
+    // 输入: logits [n_expert, n_tokens]
+    // 输出: probs [n_expert, n_tokens]
     // - qwen3_moe 使用 softmax
     ggml_tensor * probs = nullptr;
     switch (gating_op) {
@@ -698,8 +703,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     // add experts selection bias - introduced in DeepSeek V3
     // leave probs unbiased as it's later used to get expert weights
-    // 专家选择偏置，DeepSeek V3 引入，最终得到 selection_probs
+    // 专家选择偏置（可选），DeepSeek V3 引入，最终得到 selection_probs
     ggml_tensor * selection_probs = probs;
+    // 输入: probs [n_expert, n_tokens], exp_probs_b [n_expert, n_tokens]
+    // 输出: selection_probs [n_expert, n_tokens]
     if (exp_probs_b != nullptr) {
         selection_probs = ggml_add(ctx0, probs, exp_probs_b);
         cb(selection_probs, "ffn_moe_probs_biased", il);
@@ -713,14 +720,18 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     // select experts
     // Top-K 专家选择
-    // selected_experts = top_k(scores)
-    ggml_tensor * selected_experts = ggml_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+    // selected_experts = top_k(selection_probs)
+    // 输入: selection_probs [n_expert, n_tokens]
+    // 输出: selected_experts [n_expert_used, n_tokens] (专家索引)
+    ggml_tensor * selected_experts = ggml_top_k(ctx0, selection_probs, n_expert_used); 
     cb(selected_experts->src[0], "ffn_moe_argsort", il);
     cb(selected_experts, "ffn_moe_topk", il);
 
     // 提取专家权重
+    // 输入: probs [1, n_expert, n_tokens], selected_experts [n_expert_used, n_tokens]
+    // 输出: weights [1, n_expert_used, n_tokens]
     ggml_tensor * weights = ggml_get_rows(ctx0,
-            ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens), selected_experts); // [1, n_expert_used, n_tokens]
+            ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens), selected_experts); 
     cb(weights, "ffn_moe_weights", il);
 
     // 归一化(可选):
@@ -741,6 +752,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(weights, "ffn_moe_weights_scaled", il);
     }
 
+    // 输入张量重塑
+    // 形状: [n_embd, n_tokens] → [n_embd, 1, n_tokens]
+    // 在中间添加一个维度1，这样后续的专家计算函数build_lora_mm_id就可以：
+    // 1. 将这个 [n_embd, 1, n_tokens] 的张量在第二个维度上复制/广播成 [n_embd, n_expert_used, n_tokens]
+    // 2. 让每个选中的专家都能独立处理所有token
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
 
     if (weight_before_ffn) {
@@ -750,29 +766,38 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(cur, "ffn_moe_weighted", il);
     }
 
-    // 开始计算 down_proj(silu(gate_proj(x)) * up_proj(x))
+    // FFN_i(x) = W_down_i * swiglu(gate_exps * x, up_proj * x)
+    // FFN_i(x) = down_exps * (silu(gate_exps * x) * (up_proj * x))
 
-    // up_proj(x)
+    // 上投影
+    // up = up_proj * cur
+    // 输入: cur [n_embd, n_expert_used, n_tokens], up_exps 权重矩阵
+    // 输出: up [n_ff, n_expert_used, n_tokens]
     ggml_tensor * up = build_lora_mm_id(up_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
     cb(up, "ffn_moe_up", il);
 
     ggml_tensor * experts = nullptr;
 
-    // gate_proj(x)
+    // 门控投影（如果存在）
     if (gate_exps) {
+        // cur = gate_exps * cur
+        // 输入: cur [n_embd, n_expert_used, n_tokens], gate_exps权重矩阵
+        // 输出: cur [n_ff, n_expert_used, n_tokens]
         cur = build_lora_mm_id(gate_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
         cb(cur, "ffn_moe_gate", il);
     } else {
+        // cur = up
         cur = up;
     }
 
-    // silu(gate_proj(x))
     switch (type_op) {
         case LLM_FFN_SILU:
             if (gate_exps) {
+                // cur = swiglu(cur, up) = silu(cur) * up
                 cur = ggml_swiglu_split(ctx0, cur, up);
                 cb(cur, "ffn_moe_swiglu", il);
             } else {
+                // cur = silu(cur)
                 cur = ggml_silu(ctx0, cur);
                 cb(cur, "ffn_moe_silu", il);
             } break;
@@ -788,6 +813,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
+    // 下投影
+    // experts = down_exps * cur
+    // 输入: cur [n_ff, n_expert_used, n_tokens], down_exps权重矩阵
+    // 输出: experts [n_embd, n_expert_used, n_tokens]
     experts = build_lora_mm_id(down_exps, cur, selected_experts); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 
@@ -798,8 +827,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     // aggregate experts
-    // 循环 n_expert_used 次
-    // 在每次循环中，使用 ggml_view_2d 获取 experts 张量中第 i 个被选专家（对于所有 token）的最终输出的一个视图
+    // 聚合所有专家的输出
+    // moe_out = Σ_{i=0}^{n_expert_used-1} expert_output_i
+    // 最终输出: moe_out [n_embd, n_tokens]
     ggml_tensor * moe_out = nullptr;
     for (int i = 0; i < n_expert_used; ++i) {
         ggml_tensor * cur_expert = ggml_view_2d(ctx0, experts, n_embd, n_tokens,
