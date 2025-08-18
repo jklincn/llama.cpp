@@ -2103,6 +2103,9 @@ struct ggml_tensor * ggml_sub_inplace(
 
 // ggml_mul
 
+// Hadamard积，又称逐项乘积
+// 对两个张量在相同位置元素逐一相乘，并支持广播
+
 static struct ggml_tensor * ggml_mul_impl(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
@@ -2987,10 +2990,12 @@ struct ggml_tensor * ggml_l2_norm_inplace(
 static inline bool ggml_can_mul_mat(const struct ggml_tensor * t0, const struct ggml_tensor * t1) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
-    return (t0->ne[0]           == t1->ne[0])  &&
+    return (t0->ne[0]           == t1->ne[0])  && // A 的行等于 B 的行，Aᵀ × B 才符合乘法运算
            (t1->ne[2]%t0->ne[2] == 0)          && // verify t0 is broadcastable
            (t1->ne[3]%t0->ne[3] == 0);
 }
+
+// 矩阵乘法（Aᵀ × B）
 
 struct ggml_tensor * ggml_mul_mat(
         struct ggml_context * ctx,

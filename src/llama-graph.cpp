@@ -422,7 +422,6 @@ ggml_tensor * llm_graph_context::build_cvec(
 ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * w,
           ggml_tensor * cur) const {
-    // gate(x)
     ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
 
     // 遍历所有已加载的 LoRA 适配器
@@ -705,8 +704,6 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     // leave probs unbiased as it's later used to get expert weights
     // 专家选择偏置（可选），DeepSeek V3 引入，最终得到 selection_probs
     ggml_tensor * selection_probs = probs;
-    // 输入: probs [n_expert, n_tokens], exp_probs_b [n_expert, n_tokens]
-    // 输出: selection_probs [n_expert, n_tokens]
     if (exp_probs_b != nullptr) {
         selection_probs = ggml_add(ctx0, probs, exp_probs_b);
         cb(selection_probs, "ffn_moe_probs_biased", il);
@@ -766,10 +763,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(cur, "ffn_moe_weighted", il);
     }
 
-    // FFN_i(x) = W_down_i * swiglu(gate_exps * x, up_proj * x)
-    // FFN_i(x) = down_exps * (silu(gate_exps * x) * (up_proj * x))
+    // 开始计算 FFN(x) = down_exps * swiglu(gate_exps * x, up_proj * x)
+    // swiglu(a, b) 操作等于 swish(a) * b，swish 是高级 silu
 
-    // 上投影
+    // 上投影（up_proj * x）
     // up = up_proj * cur
     // 输入: cur [n_embd, n_expert_used, n_tokens], up_exps 权重矩阵
     // 输出: up [n_ff, n_expert_used, n_tokens]
@@ -778,7 +775,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     ggml_tensor * experts = nullptr;
 
-    // 门控投影（如果存在）
+    // 门控投影（gate_exps * x）
     if (gate_exps) {
         // cur = gate_exps * cur
         // 输入: cur [n_embd, n_expert_used, n_tokens], gate_exps权重矩阵
@@ -793,7 +790,8 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     switch (type_op) {
         case LLM_FFN_SILU:
             if (gate_exps) {
-                // cur = swiglu(cur, up) = silu(cur) * up
+                // swiglu(gate_exps * x, up_proj * x)
+                // cur = swiglu(cur, up)
                 cur = ggml_swiglu_split(ctx0, cur, up);
                 cb(cur, "ffn_moe_swiglu", il);
             } else {
@@ -820,7 +818,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     experts = build_lora_mm_id(down_exps, cur, selected_experts); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 
-    // experts * weights
+    // experts * weights （Hadamard积，又称逐项乘积）
+    // 输入： experts [n_embd, n_expert_used, n_tokens], weights [1, n_expert_used, n_tokens]
+    // 输出： experts [n_embd, n_expert_used, n_tokens]
+    // 计算时 weights 由 [1, n_expert_used, n_tokens] 广播为 [n_embd, n_expert_used, n_tokens]
     if (!weight_before_ffn) {
         experts = ggml_mul(ctx0, experts, weights);
         cb(cur, "ffn_moe_weighted", il);
