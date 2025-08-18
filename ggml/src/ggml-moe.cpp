@@ -1,15 +1,13 @@
 #include "ggml-moe.h"
 
-// C++ standard library headers
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <regex>  // 用于从张量名称中解析层索引
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -62,8 +60,8 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
     counter->num_experts = experts;
     counter->expert_activation_counts.assign(layers, std::vector<int>(experts, 0));
     counter->initialized = true;
-    GGML_LOG_INFO("🚀 MoE激活计数器已初始化 (模型层数: %d 层, 每层专家数量: %d, 激活专家数: %d)\n", layers, experts,
-                  expert_used);
+    GGML_LOG_INFO(
+        "🚀 MoE激活计数器已初始化 (模型层数: %d 层, 每层专家数量: %d, 激活专家数: %d)\n", layers, experts, expert_used);
     return true;
 }
 
@@ -128,8 +126,8 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
 
     // 2. 验证张量类型 (我们期望的是包含专家索引的I32张量)
     if (t->type != GGML_TYPE_I32) {
-        GGML_LOG_WARN("⚠️  跳过张量 '%s'，因为其类型不是 I32 (而是 %s)，无法解析为专家索引。\n", t->name,
-                      ggml_type_name(t->type));
+        GGML_LOG_WARN(
+            "⚠️  跳过张量 '%s'，因为其类型不是 I32 (而是 %s)，无法解析为专家索引。\n", t->name, ggml_type_name(t->type));
         return true;
     }
 
@@ -159,7 +157,7 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
             GGML_LOG_ERROR("❌ 在张量 '%s' 中发现无效的专家索引 %d。\n", t->name, expert_idx);
         }
     }
-
+    (void) updated_count;
     // GGML_LOG_INFO("📊 [层 %2d] 已处理 %zu 个专家激活，成功更新 %d 个计数。\n", layer_idx, num_indices, updated_count);
 
     return true;
@@ -209,5 +207,6 @@ void save_activation_report(const MoeActivationCounter * counter) {
     GGML_LOG_INFO("✅ 报告保存成功。\n");
     GGML_LOG_INFO("总计 %d 层, %d 个专家/层。\n", counter->num_layers, counter->num_experts);
     GGML_LOG_INFO("在本次推理中，总共记录到 %lld 次专家激活。\n", total_activations);
+    GGML_LOG_INFO("执行 python scripts/expert_activation_analysis.py 进行数据分析。\n");
     GGML_LOG_INFO("==============================\n\n");
 }
