@@ -1,5 +1,8 @@
 #include "ggml-moe.h"
 
+#include "ggml-backend.h"
+#include "ggml-impl.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -11,22 +14,16 @@
 #include <string>
 #include <vector>
 
-// ggml internal headers
-#include "ggml-backend.h"
-#include "ggml-impl.h"
-
 /**
  * @struct MoeActivationCounter
  * 用于收集和统计MoE模型中专家激活次数的C++实现。
  * 此定义对C代码隐藏。
  */
 struct MoeActivationCounter {
-    // 配置
     int num_layers  = 0;
     int num_experts = 0;
 
-    // 内存中的激活计数器
-    // 结构: expert_activation_counts[layer_index][expert_index]
+    // 激活计数器
     std::vector<std::vector<int>> expert_activation_counts;
 
     // 用于从GPU复制数据的临时缓冲区
@@ -109,13 +106,17 @@ static int parse_layer_index_from_name(const char * tensor_name) {
 bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     auto * counter = (MoeActivationCounter *) user_data;
 
+    if (!counter || !counter->initialized) {
+        return false;
+    }
+
     if (ask) {
         // 第一阶段：询问是否对该张量感兴趣
         return is_target_tensor(t->name);
     }
 
     // 第二阶段：处理感兴趣的张量数据
-    // GGML_LOG_INFO("🎯 [MoE Counter] 捕获到目标张量: %s\n", t->name);
+    // GGML_LOG_INFO("[MoE Counter] 捕获到目标张量: %s\n", t->name);
 
     // 1. 解析层索引
     int layer_idx = parse_layer_index_from_name(t->name);
@@ -158,7 +159,7 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
         }
     }
     (void) updated_count;
-    // GGML_LOG_INFO("📊 [层 %2d] 已处理 %zu 个专家激活，成功更新 %d 个计数。\n", layer_idx, num_indices, updated_count);
+    // GGML_LOG_INFO("[层 %2d] 已处理 %zu 个专家激活，成功更新 %d 个计数。\n", layer_idx, num_indices, updated_count);
 
     return true;
 }
@@ -206,7 +207,7 @@ void save_activation_report(const MoeActivationCounter * counter) {
 
     GGML_LOG_INFO("✅ 报告保存成功。\n");
     GGML_LOG_INFO("总计 %d 层, %d 个专家/层。\n", counter->num_layers, counter->num_experts);
-    GGML_LOG_INFO("在本次推理中，总共记录到 %lld 次专家激活。\n", total_activations);
+    GGML_LOG_INFO("在本次运行中，总共记录到 %lld 次专家激活。\n", total_activations);
     GGML_LOG_INFO("执行 python scripts/expert_activation_analysis.py 进行数据分析。\n");
     GGML_LOG_INFO("==============================\n\n");
 }
