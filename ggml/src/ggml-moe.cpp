@@ -167,11 +167,13 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
 /**
  * 将收集到的激活次数统计数据保存到CSV文件中。
  */
-void save_activation_report(const MoeActivationCounter * counter) {
+void save_activation_report(MoeActivationCounter * counter) {
     if (!counter || !counter->initialized) {
         GGML_LOG_ERROR("%s: 计数器未初始化。\n", __func__);
         return;
     }
+
+    counter->initialized = false;
 
     const std::string filepath = "expert_activations.csv";
 
@@ -209,5 +211,5 @@ void save_activation_report(const MoeActivationCounter * counter) {
     GGML_LOG_INFO("总计 %d 层, %d 个专家/层。\n", counter->num_layers, counter->num_experts);
     GGML_LOG_INFO("在本次运行中，总共记录到 %lld 次专家激活。\n", total_activations);
     GGML_LOG_INFO("执行 python scripts/expert_activation_analysis.py 进行数据分析。\n");
-    GGML_LOG_INFO("==============================\n\n");
+    GGML_LOG_INFO("==============================\n");
 }

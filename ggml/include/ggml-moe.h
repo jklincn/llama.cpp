@@ -62,7 +62,7 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
  * @param counter 包含累计激活数据的计数器实例指针。
  * @param output_dir 一个C字符串，指定用于存放报告文件的目录路径。
  */
-void save_activation_report(const MoeActivationCounter * counter);
+void save_activation_report(MoeActivationCounter * counter);
 
 
 #ifdef __cplusplus

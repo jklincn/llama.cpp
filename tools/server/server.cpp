@@ -1496,7 +1496,7 @@ struct server_slot {
 
     const common_chat_msg & update_chat_msg(std::vector<common_chat_msg_diff> & diffs) {
         auto previous_msg = chat_msg;
-        SRV_DBG("Parsing chat message: %s\n", generated_text.c_str());
+        SRV_INF("Parsing chat message: %s\n", generated_text.c_str());
         auto new_msg = common_chat_parse(
             generated_text,
             /* is_partial= */ stop != STOP_TYPE_EOS,
@@ -2046,9 +2046,9 @@ struct server_context {
 
         llama_init = common_init_from_params(params_base);
 
-        model = llama_init.model.get();
-        model_ptr = llama_model_ptr(model);
-        ctx   = llama_init.context.get();
+        model_ptr = std::move(llama_init.model);
+        model     = model_ptr.get();
+        ctx       = llama_init.context.get();
 
         if (model == nullptr) {
             SRV_ERR("failed to load model, '%s'\n", params_base.model.path.c_str());
@@ -3927,6 +3927,8 @@ int main(int argc, char ** argv) {
 
     common_init();
 
+    llama_model_ptr model_ptr = nullptr;
+
     // struct that contains llama context and inference
     server_context ctx_server;
 
@@ -5192,9 +5194,8 @@ int main(int argc, char ** argv) {
     LOG_INF("%s: HTTP server is listening, hostname: %s, port: %d, http threads: %d\n", __func__, params.hostname.c_str(), params.port, params.n_threads_http);
 
     // load the model
-    llama_model_ptr model_ptr = nullptr;
     LOG_INF("%s: loading model\n", __func__);
-    if (!ctx_server.load_model(params,model_ptr)) {
+    if (!ctx_server.load_model(params, model_ptr)) {
         clean_up();
         t.join();
         LOG_ERR("%s: exiting due to model loading error\n", __func__);
