@@ -909,13 +909,14 @@ std::string fs_get_cache_file(const std::string & filename) {
 // Model utils
 //
 
+// 这里会返回一个 model 指针和 context 指针
 struct common_init_result common_init_from_params(common_params & params) {
     common_init_result iparams;
 
     // 从 CLI 参数中获取模型参数
     auto mparams = common_model_params_to_llama(params);
 
-    // 从硬盘加载权重
+    // 从硬盘加载权重，获得 model
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
     if (model == NULL) {
         LOG_ERR("%s: failed to load model '%s'\n", __func__, params.model.path.c_str());
@@ -928,7 +929,7 @@ struct common_init_result common_init_from_params(common_params & params) {
     // 从 CLI 参数中获取上下文参数
     auto cparams = common_context_params_to_llama(params);
 
-    // 创建推理上下文
+    // 创建上下文，这里的 model 仅引用
     llama_context * lctx = llama_init_from_model(model, cparams);
     if (lctx == NULL) {
         LOG_ERR("%s: failed to create context with model '%s'\n", __func__, params.model.path.c_str());

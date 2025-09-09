@@ -2044,10 +2044,14 @@ struct server_context {
 
         params_base = params;
 
+        // 创建 model 和 context，要保证这两个的生命周期
         llama_init = common_init_from_params(params_base);
 
+        // 获取模型
         model_ptr = std::move(llama_init.model);
         model     = model_ptr.get();
+
+        // 获取上下文
         ctx       = llama_init.context.get();
 
         if (model == nullptr) {
@@ -5192,6 +5196,8 @@ int main(int argc, char ** argv) {
     svr->wait_until_ready();
 
     LOG_INF("%s: HTTP server is listening, hostname: %s, port: %d, http threads: %d\n", __func__, params.hostname.c_str(), params.port, params.n_threads_http);
+
+    // 服务端启动完成，开始模型加载
 
     // load the model
     LOG_INF("%s: loading model\n", __func__);

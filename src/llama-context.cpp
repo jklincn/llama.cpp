@@ -16,9 +16,11 @@
 // llama_context
 //
 
+// 创建上下文
 llama_context::llama_context(
         const llama_model & model,
               llama_context_params params) :
+    // model 赋值
     model(model),
     balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd())) {
     LLAMA_LOG_INFO("%s: constructing llama_context\n", __func__);
@@ -2360,6 +2362,7 @@ llama_context_params llama_context_default_params() {
     return result;
 }
 
+// 一系列检查
 llama_context * llama_init_from_model(
                  llama_model * model,
         llama_context_params   params) {
@@ -2389,6 +2392,7 @@ llama_context * llama_init_from_model(
     }
 
     try {
+        // 创建上下文
         auto * ctx = new llama_context(*model, params);
         return ctx;
     } catch (const std::exception & err) {
