@@ -836,8 +836,8 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
 
+    // 计算专家选择 logits
     ggml_tensor * logits = nullptr;
-
     if (probs_in == nullptr) {
         logits = build_lora_mm(gate_inp, cur); // [n_expert, n_tokens]
         cb(logits, "ffn_moe_logits", il);
@@ -905,13 +905,14 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens), selected_experts); 
     cb(weights, "ffn_moe_weights", il);
 
+    // 权重后处理
     if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
         weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
         weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
         weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
         cb(weights, "ffn_moe_weights_softmax", il);
     }
-
+    // 显式归一化
     if (norm_w) {
         weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
 
@@ -931,7 +932,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     // 输入张量重塑
     // 形状: [n_embd, n_tokens] → [n_embd, 1, n_tokens]
-    // 在中间添加一个维度1，这样后续的专家计算函数build_lora_mm_id就可以：
+    // 在中间添加一个维度1，这样后续的专家计算函数 build_lora_mm_id 就可以：
     // 1. 将这个 [n_embd, 1, n_tokens] 的张量在第二个维度上复制/广播成 [n_embd, n_expert_used, n_tokens]
     // 2. 让每个选中的专家都能独立处理所有token
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
@@ -944,7 +945,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     // 开始计算 FFN(x) = down_exps * swiglu(gate_exps * x, up_proj * x)
-    // swiglu(a, b) 操作等于 swish(a) * b，swish 是高级 silu
+    // SwiGLU(gate, up)=SiLU(gate)⊙up
 
     // 上投影（up_proj * x）
     // up = up_proj * cur
@@ -968,6 +969,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cur = build_lora_mm_id(gate_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
         cb(cur, "ffn_moe_gate", il);
     } else {
+        // 单分支 FFN
         // cur = up
         cur = up;
     }
@@ -1038,6 +1040,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     assert(n_expert_used > 0);
 
+    // 用视图把每个专家独立切成 2D 张量
     // order the views before the adds
     for (uint32_t i = 0; i < hparams.n_expert_used; ++i) {
         cur_experts[i] = ggml_view_2d(ctx0, experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1]);
@@ -1051,6 +1054,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     //       ref: https://github.com/ggml-org/llama.cpp/pull/14753
     ggml_tensor * moe_out = cur_experts[0];
 
+    // 把所有 2D 视图逐个相加
     for (uint32_t i = 1; i < hparams.n_expert_used; ++i) {
         moe_out = ggml_add(ctx0, moe_out, cur_experts[i]);
     }

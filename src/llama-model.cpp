@@ -8968,6 +8968,7 @@ struct llm_build_qwen3 : public llm_graph_context {
     }
 };
 
+// 继承 llm_graph_context：使用 params 初始化 llm_graph_context
 struct llm_build_qwen3moe : public llm_graph_context {
     llm_build_qwen3moe(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
         const int64_t n_embd_head = hparams.n_embd_head_v;
@@ -8978,18 +8979,24 @@ struct llm_build_qwen3moe : public llm_graph_context {
         ggml_tensor * cur;
         ggml_tensor * inpL;
 
+        // 把本批 token 通过 词嵌入矩阵做 get_rows 得到 embedding，作为第 0 层的输入
         inpL = build_inp_embd(model.tok_embd);
 
+        // 构造位置张量
         // inp_pos - contains the positions
         ggml_tensor * inp_pos = build_inp_pos();
 
+        // 构造注意力所需的 KV 输入/缓存句柄与 mask 等辅助张量。
         auto * inp_attn = build_attn_inp_kv_unified();
 
+        // 如果只关心若干位置（常见于“只取最后一个 token 的 logits”），这里会给出要 gather 的 row 索引
         ggml_tensor * inp_out_ids = build_inp_out_ids();
 
         for (int il = 0; il < n_layer; ++il) {
+            // 保存残差
             ggml_tensor * inpSA = inpL;
 
+            // 注意力前的 RMSNorm
             // norm
             cur = build_norm(inpL,
                     model.layers[il].attn_norm, NULL,
@@ -9039,6 +9046,7 @@ struct llm_build_qwen3moe : public llm_graph_context {
                         Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
             }
 
+            // 只在最后一层做必要的行选择（可选）
             if (il == n_layer - 1 && inp_out_ids) {
                 cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
@@ -9050,6 +9058,7 @@ struct llm_build_qwen3moe : public llm_graph_context {
 
             // MoE branch
             // MoE 层
+
             // 归一化
             cur = build_norm(ffn_inp,
                     model.layers[il].ffn_norm, NULL,
@@ -9058,12 +9067,12 @@ struct llm_build_qwen3moe : public llm_graph_context {
 
             ggml_tensor * moe_out =
                 build_moe_ffn(cur,
-                        model.layers[il].ffn_gate_inp,
-                        model.layers[il].ffn_up_exps,
-                        model.layers[il].ffn_gate_exps,
-                        model.layers[il].ffn_down_exps,
-                        nullptr,
-                        n_expert, n_expert_used,
+                        model.layers[il].ffn_gate_inp,     // router 的线性层
+                        model.layers[il].ffn_up_exps,       // 每个 expert 的上投影
+                        model.layers[il].ffn_gate_exps,   // 每个 expert 的门控 (SwiGLU/SiLU)
+                        model.layers[il].ffn_down_exps,   // 每个 expert 的下投影
+                        nullptr,                        // 专家偏置
+                        n_expert, n_expert_used,                    // 总专家数 / 本步激活的 top-k
                         LLM_FFN_SILU, true,
                         false, 0.0,
                         LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
@@ -9071,6 +9080,7 @@ struct llm_build_qwen3moe : public llm_graph_context {
             cb(moe_out, "ffn_moe_out", il);
             cur = moe_out;
 
+            // 残差连接
             cur = ggml_add(ctx0, cur, ffn_inp);
 
             cur = build_cvec(cur, il);

@@ -1496,7 +1496,7 @@ struct server_slot {
 
     const common_chat_msg & update_chat_msg(std::vector<common_chat_msg_diff> & diffs) {
         auto previous_msg = chat_msg;
-        SRV_INF("Parsing chat message: %s\n", generated_text.c_str());
+        SRV_DBG("Parsing chat message: %s\n", generated_text.c_str());
         auto new_msg = common_chat_parse(
             generated_text,
             /* is_partial= */ stop != STOP_TYPE_EOS,
