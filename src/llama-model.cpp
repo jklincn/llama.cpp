@@ -2301,6 +2301,11 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                 }
             }
 
+            LLAMA_LOG_INFO("[DEBUG] Tensor: %-36s | Size: %4zu MiB | Assigned to: %s\n",
+                   tn.str().c_str(),
+                   ggml_nbytes(t_meta) / 1024 / 1024,
+                   ggml_backend_buft_name(buft));
+
             // 为该缓冲区类型创建（获取）上下文
             ggml_context * ctx = ctx_for_buft(buft);
 
