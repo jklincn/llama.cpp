@@ -870,7 +870,7 @@ static std::string common_docker_resolve_model(const std::string & docker) {
 
 // Helper function to parse tensor buffer override strings
 static void parse_tensor_buffer_overrides(const std::string & value, std::vector<llama_model_tensor_buft_override> & overrides) {
-    LOG_DBG("Parsing tensor buffer overrides string: \"%s\"\n", value.c_str());
+    LOG_INF("Parsing tensor buffer overrides string: \"%s\"\n", value.c_str());
 
     std::map<std::string, ggml_backend_buffer_type_t> buft_list;
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
@@ -881,18 +881,18 @@ static void parse_tensor_buffer_overrides(const std::string & value, std::vector
         }
     }
 
-    LOG_DBG("Available buffer types:\n");
+    LOG_INF("Available buffer types:\n");
     if (buft_list.empty()) {
-        LOG_DBG("   - No backend buffer types found.\n");
+        LOG_INF("   - No backend buffer types found.\n");
     } else {
         for (const auto & it : buft_list) {
-            LOG_DBG("   - %s\n", ggml_backend_buft_name(it.second));
+            LOG_INF("   - %s\n", ggml_backend_buft_name(it.second));
         }
     }
 
     int rule_index = 0;
     for (const auto & override : string_split<std::string>(value, ',')) {
-        LOG_DBG("Processing rule #%d: \"%s\"\n", rule_index, override.c_str());
+        LOG_INF("Processing rule #%d: \"%s\"\n", rule_index, override.c_str());
 
         std::string::size_type pos = override.find('=');
         if (pos == std::string::npos) {
@@ -901,13 +901,13 @@ static void parse_tensor_buffer_overrides(const std::string & value, std::vector
         std::string tensor_name = override.substr(0, pos);
         std::string buffer_type = override.substr(pos + 1);
 
-        LOG_DBG("  - Parsed Tensor Name (regex): \"%s\"\n", tensor_name.c_str());
-        LOG_DBG("  - Parsed Target Buffer Type:  \"%s\"\n", buffer_type.c_str());
+        LOG_INF("  - Parsed Tensor Name (regex): \"%s\"\n", tensor_name.c_str());
+        LOG_INF("  - Parsed Target Buffer Type:  \"%s\"\n", buffer_type.c_str());
 
         if (buft_list.find(buffer_type) == buft_list.end()) {
-            printf("Available buffer types:\n");
+            LOG_INF("Available buffer types:\n");
             for (const auto & it : buft_list) {
-                printf("  %s\n", ggml_backend_buft_name(it.second));
+                LOG_INF("  %s\n", ggml_backend_buft_name(it.second));
             }
             throw std::invalid_argument("unknown buffer type");
         }
@@ -916,7 +916,7 @@ static void parse_tensor_buffer_overrides(const std::string & value, std::vector
         buft_overrides.push_back(tensor_name);
         overrides.push_back({buft_overrides.back().c_str(), buft_list.at(buffer_type)});
 
-        LOG_DBG("  - SUCCESS: Added override rule #%d for buffer type '%s'.\n", rule_index, buffer_type.c_str());
+        LOG_INF("  - SUCCESS: Added override rule #%d for buffer type '%s'.\n", rule_index, buffer_type.c_str());
         rule_index++;
     }
 }
