@@ -38,10 +38,10 @@ llama_context::llama_context(
 
     cparams.n_threads        = params.n_threads;
     cparams.n_threads_batch  = params.n_threads_batch;
-    cparams.yarn_ext_factor  = params.yarn_ext_factor;
-    cparams.yarn_attn_factor = params.yarn_attn_factor;
-    cparams.yarn_beta_fast   = params.yarn_beta_fast;
-    cparams.yarn_beta_slow   = params.yarn_beta_slow;
+    cparams.yarn_ext_factor  = params.yarn_ext_factor  >= 0.0f ? params.yarn_ext_factor  : hparams.yarn_ext_factor;
+    cparams.yarn_attn_factor = params.yarn_attn_factor >= 0.0f ? params.yarn_attn_factor : hparams.yarn_attn_factor;
+    cparams.yarn_beta_fast   = params.yarn_beta_fast   >= 0.0f ? params.yarn_beta_fast   : hparams.yarn_beta_fast;
+    cparams.yarn_beta_slow   = params.yarn_beta_slow   >= 0.0f ? params.yarn_beta_slow   : hparams.yarn_beta_slow;
     cparams.embeddings       = params.embeddings;
     cparams.offload_kqv      = params.offload_kqv;
     cparams.no_perf          = params.no_perf;
@@ -117,11 +117,24 @@ llama_context::llama_context(
         }
     }
 
-    const uint32_t n_ctx_per_seq = cparams.n_ctx / cparams.n_seq_max;
+    if (cparams.kv_unified) {
+        cparams.n_ctx_seq = cparams.n_ctx;
+    } else {
+        cparams.n_ctx_seq = cparams.n_ctx / cparams.n_seq_max;
+
+        if (cparams.n_ctx_seq == 0) {
+            throw std::runtime_error("n_ctx_seq == 0");
+        }
+
+        if (cparams.n_ctx != cparams.n_ctx_seq * cparams.n_seq_max) {
+            cparams.n_ctx =  cparams.n_ctx_seq * cparams.n_seq_max;
+            LLAMA_LOG_WARN("%s: n_ctx is not divisible by n_seq_max - rounding down to %u\n", __func__, cparams.n_ctx);
+        }
+    }
 
     LLAMA_LOG_INFO("%s: n_seq_max     = %u\n",   __func__, cparams.n_seq_max);
     LLAMA_LOG_INFO("%s: n_ctx         = %u\n",   __func__, cparams.n_ctx);
-    LLAMA_LOG_INFO("%s: n_ctx_per_seq = %u\n",   __func__, n_ctx_per_seq);
+    LLAMA_LOG_INFO("%s: n_ctx_seq     = %u\n",   __func__, cparams.n_ctx_seq);
     LLAMA_LOG_INFO("%s: n_batch       = %u\n",   __func__, cparams.n_batch);
     LLAMA_LOG_INFO("%s: n_ubatch      = %u\n",   __func__, cparams.n_ubatch);
     LLAMA_LOG_INFO("%s: causal_attn   = %d\n",   __func__, cparams.causal_attn);
@@ -130,15 +143,14 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: freq_base     = %.1f\n", __func__, cparams.rope_freq_base);
     LLAMA_LOG_INFO("%s: freq_scale    = %g\n",   __func__, cparams.rope_freq_scale);
 
-    // 当前上下文长度小于模型训练时的上下文长度，意味着模型的能力没有被完整利用
-    if (n_ctx_per_seq < hparams.n_ctx_train) {
-        LLAMA_LOG_WARN("%s: n_ctx_per_seq (%u) < n_ctx_train (%u) -- the full capacity of the model will not be utilized\n",
-                __func__, n_ctx_per_seq, hparams.n_ctx_train);
+    if (cparams.n_ctx_seq < hparams.n_ctx_train) {
+        LLAMA_LOG_WARN("%s: n_ctx_seq (%u) < n_ctx_train (%u) -- the full capacity of the model will not be utilized\n",
+                __func__, cparams.n_ctx_seq, hparams.n_ctx_train);
     }
 
-    if (n_ctx_per_seq > hparams.n_ctx_train) {
-        LLAMA_LOG_WARN("%s: n_ctx_per_seq (%u) > n_ctx_train (%u) -- possible training context overflow\n",
-                __func__, n_ctx_per_seq, hparams.n_ctx_train);
+    if (cparams.n_ctx_seq > hparams.n_ctx_train) {
+        LLAMA_LOG_WARN("%s: n_ctx_seq (%u) > n_ctx_train (%u) -- possible training context overflow\n",
+                __func__, cparams.n_ctx_seq, hparams.n_ctx_train);
     }
 
     if (!hparams.vocab_only) {
@@ -292,9 +304,7 @@ llama_context::llama_context(
         if (pipeline_parallel) {
             LLAMA_LOG_INFO("%s: pipeline parallelism enabled (n_copies=%d)\n", __func__, ggml_backend_sched_get_n_copies(sched.get()));
         }
-    }
 
-    if (!hparams.vocab_only) {
         llama_memory_context_ptr mctx;
         if (memory) {
             LLAMA_LOG_DEBUG("%s: reserving full memory module\n", __func__);
@@ -367,7 +377,14 @@ llama_context::llama_context(
         {
             auto * gf = graph_reserve(n_tokens, n_seqs, n_tokens, mctx.get());
             if (!gf) {
-                throw std::runtime_error("failed to allocate compute pp buffers");
+                if (pipeline_parallel) {
+                    LLAMA_LOG_WARN("%s: compute buffer allocation failed, retrying without pipeline parallelism\n", __func__);
+                    sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, false, cparams.op_offload));
+                    gf = graph_reserve(n_tokens, n_seqs, n_tokens, mctx.get());
+                }
+                if (!gf) {
+                    throw std::runtime_error("failed to allocate compute pp buffers");
+                }
             }
 
             n_splits_pp = ggml_backend_sched_get_n_splits(sched.get());
@@ -474,8 +491,8 @@ uint32_t llama_context::n_ctx() const {
     return cparams.n_ctx;
 }
 
-uint32_t llama_context::n_ctx_per_seq() const {
-    return cparams.n_ctx / cparams.n_seq_max;
+uint32_t llama_context::n_ctx_seq() const {
+    return cparams.n_ctx_seq;
 }
 
 uint32_t llama_context::n_batch() const {
@@ -2107,6 +2124,21 @@ void llama_context::perf_reset() {
     n_reused    = 0;
 }
 
+std::map<ggml_backend_buffer_type_t, llama_memory_breakdown_data> llama_context::memory_breakdown() const {
+    std::map<ggml_backend_buffer_type_t, llama_memory_breakdown_data> ret;
+    for (const auto & buft_size : model.memory_breakdown()) {
+        ret[buft_size.first].model += buft_size.second;
+    }
+    for (const auto & buft_size : memory->memory_breakdown()) {
+        ret[buft_size.first].context += buft_size.second;
+    }
+    for (const auto & backend_ptr : backends) {
+        ggml_backend_t backend = backend_ptr.get();
+        ret[ggml_backend_sched_get_buffer_type(sched.get(), backend)].compute += ggml_backend_sched_get_buffer_size(sched.get(), backend);
+    }
+    return ret;
+}
+
 //
 // training
 //
@@ -2343,9 +2375,9 @@ llama_context_params llama_context_default_params() {
         /*.rope_freq_base              =*/ 0.0f,
         /*.rope_freq_scale             =*/ 0.0f,
         /*.yarn_ext_factor             =*/ -1.0f,
-        /*.yarn_attn_factor            =*/ 1.0f,
-        /*.yarn_beta_fast              =*/ 32.0f,
-        /*.yarn_beta_slow              =*/ 1.0f,
+        /*.yarn_attn_factor            =*/ -1.0f,
+        /*.yarn_beta_fast              =*/ -1.0f,
+        /*.yarn_beta_slow              =*/ -1.0f,
         /*.yarn_orig_ctx               =*/ 0,
         /*.defrag_thold                =*/ -1.0f,
         /*.cb_eval                     =*/ nullptr,
@@ -2412,6 +2444,13 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
+    if (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED &&
+        params.pooling_type != model->hparams.pooling_type) {
+        //user-specified pooling-type is different from the model default
+        LLAMA_LOG_WARN("%s: model default pooling_type is [%d], but [%d] was specified\n", __func__,
+                       model->hparams.pooling_type, params.pooling_type);
+    }
+
     try {
         // 创建上下文
         auto * ctx = new llama_context(*model, params);
@@ -2436,6 +2475,10 @@ void llama_free(llama_context * ctx) {
 
 uint32_t llama_n_ctx(const llama_context * ctx) {
     return ctx->n_ctx();
+}
+
+uint32_t llama_n_ctx_seq(const llama_context * ctx) {
+    return ctx->n_ctx_seq();
 }
 
 uint32_t llama_n_batch(const llama_context * ctx) {
@@ -2845,6 +2888,142 @@ void llama_perf_context_print(const llama_context * ctx) {
 
 void llama_perf_context_reset(llama_context * ctx) {
     ctx->perf_reset();
+}
+
+void llama_memory_breakdown_print(const struct llama_context * ctx) {
+    const std::vector<ggml_backend_dev_t> & devices = ctx->get_model().devices;
+
+    std::map<ggml_backend_buffer_type_t, llama_memory_breakdown_data> memory_breakdown = ctx->memory_breakdown();
+
+    std::vector<std::array<std::string, 9>> table_data;
+    table_data.reserve(devices.size());
+    const std::string template_header = "%s: | %s | %s   %s    %s   %s   %s   %s    %s |\n";
+    const std::string template_gpu    = "%s: | %s | %s = %s + (%s = %s + %s + %s) + %s |\n";
+    const std::string template_other  = "%s: | %s | %s   %s    %s = %s + %s + %s    %s |\n";
+
+    table_data.push_back({template_header, "memory breakdown [MiB]", "total", "free", "self", "model", "context", "compute", "unaccounted"});
+
+    constexpr size_t MiB = 1024 * 1024;
+    const std::vector<std::string> desc_prefixes_strip = {"NVIDIA ", "GeForce ", "Tesla ", "AMD ", "Radeon ", "Instinct "};
+
+    // track seen buffer types to avoid double counting:
+    std::set<ggml_backend_buffer_type_t> seen_buffer_types;
+
+    // accumulative memory breakdown for each device and for host:
+    std::vector<llama_memory_breakdown_data> mb_dev(devices.size());
+    llama_memory_breakdown_data              mb_host;
+
+    for (const auto & buft_mb : memory_breakdown) {
+        ggml_backend_buffer_type_t          buft = buft_mb.first;
+        const llama_memory_breakdown_data & mb   = buft_mb.second;
+        if (ggml_backend_buft_is_host(buft)) {
+            mb_host.model   += mb.model;
+            mb_host.context += mb.context;
+            mb_host.compute += mb.compute;
+            seen_buffer_types.insert(buft);
+            continue;
+        }
+        ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+        if (dev) {
+            int i_dev = -1;
+            for (size_t i = 0; i < devices.size(); i++) {
+                if (devices[i] == dev) {
+                    i_dev = i;
+                    break;
+                }
+            }
+            if (i_dev != -1) {
+                mb_dev[i_dev].model   += mb.model;
+                mb_dev[i_dev].context += mb.context;
+                mb_dev[i_dev].compute += mb.compute;
+                seen_buffer_types.insert(buft);
+                continue;
+            }
+        }
+    }
+
+    // print memory breakdown for each device:
+    for (size_t i = 0; i < devices.size(); i++) {
+        ggml_backend_dev_t          dev = devices[i];
+        llama_memory_breakdown_data mb  = mb_dev[i];
+
+        const std::string name = ggml_backend_dev_name(dev);
+        std::string desc = ggml_backend_dev_description(dev);
+        for (const std::string & prefix : desc_prefixes_strip) {
+            if (desc.length() >= prefix.length() && desc.substr(0, prefix.length()) == prefix) {
+                desc = desc.substr(prefix.length());
+            }
+        }
+
+        size_t free, total;
+        ggml_backend_dev_memory(dev, &free, &total);
+
+        const size_t self = mb.model + mb.context + mb.compute;
+        const size_t unaccounted = total - self - free;
+
+        table_data.push_back({
+            template_gpu,
+            "  - " + name + " (" + desc + ")",
+            std::to_string(total / MiB),
+            std::to_string(free / MiB),
+            std::to_string(self / MiB),
+            std::to_string(mb.model / MiB),
+            std::to_string(mb.context / MiB),
+            std::to_string(mb.compute / MiB),
+            std::to_string(unaccounted / MiB)});
+    }
+
+    // print memory breakdown for host:
+    {
+        const size_t self = mb_host.model + mb_host.context + mb_host.compute;
+        table_data.push_back({
+            template_other,
+            "  - Host",
+            "", // total
+            "", // free
+            std::to_string(self / MiB),
+            std::to_string(mb_host.model / MiB),
+            std::to_string(mb_host.context / MiB),
+            std::to_string(mb_host.compute / MiB),
+            ""}); // unaccounted
+    }
+
+    // print memory breakdown for all remaining buffer types:
+    for (const auto & buft_mb : memory_breakdown) {
+        ggml_backend_buffer_type_t          buft = buft_mb.first;
+        const llama_memory_breakdown_data & mb   = buft_mb.second;
+        if (seen_buffer_types.count(buft) == 1) {
+            continue;
+        }
+        const std::string name = ggml_backend_buft_name(buft);
+        const size_t self = mb.model + mb.context + mb.compute;
+        table_data.push_back({
+            template_other,
+            "  - " + name,
+            "", // total
+            "", // free
+            std::to_string(self / MiB),
+            std::to_string(mb.model / MiB),
+            std::to_string(mb.context / MiB),
+            std::to_string(mb.compute / MiB),
+            ""}); // unaccounted
+        seen_buffer_types.insert(buft);
+    }
+
+    for (size_t j = 1; j < table_data[0].size(); j++) {
+        size_t max_len = 0;
+        for (const auto & td : table_data) {
+            max_len = std::max(max_len, td[j].length());
+        }
+        for (auto & td : table_data) {
+            td[j].insert(j == 1 ? td[j].length() : 0, max_len - td[j].length(), ' ');
+        }
+    }
+    for (const auto & td : table_data) {
+        LLAMA_LOG_INFO(td[0].c_str(),
+            __func__, td[1].c_str(), td[2].c_str(), td[3].c_str(), td[4].c_str(), td[5].c_str(),
+            td[6].c_str(), td[7].c_str(), td[8].c_str());
+    }
 }
 
 //
