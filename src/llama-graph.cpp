@@ -891,6 +891,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(logits, "ffn_moe_logits_biased", il);
     }
 
+
+    // 128 变 64
+    // logits = llama_moe_prune_gate(logits)
+
+
     // 计算专家概率
     // probs = softmax(logits) 
     // 输入: logits [n_expert, n_tokens]
