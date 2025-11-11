@@ -20,6 +20,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <iostream>
 #include <condition_variable>
 #include <cstddef>
 #include <cinttypes>
@@ -3779,6 +3782,20 @@ struct server_context {
 
                         slot.state = SLOT_STATE_PROCESSING_PROMPT;
 
+                        {
+                            const auto now   = std::chrono::system_clock::now();
+                            const auto tp_ms = std::chrono::time_point_cast<std::chrono::milliseconds>(now);
+                            std::time_t tt = std::chrono::system_clock::to_time_t(tp_ms);
+                            std::tm tm{};
+                            localtime_r(&tt, &tm);
+                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                tp_ms.time_since_epoch()) % std::chrono::seconds(1);
+
+                            char ts[32];
+                            std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
+                            LOG_INF("prompt start: %s.%06d\n", ts, (int)ms.count());
+                        }
+
                         SLT_INF(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                 slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
 
@@ -4354,6 +4371,19 @@ struct server_context {
                 const int64_t t_current = ggml_time_us();
 
                 if (slot.n_decoded == 1) {
+                    {
+                        const auto now   = std::chrono::system_clock::now();
+                        const auto tp_ms = std::chrono::time_point_cast<std::chrono::milliseconds>(now);
+                        std::time_t tt = std::chrono::system_clock::to_time_t(tp_ms);
+                        std::tm tm{};
+                        localtime_r(&tt, &tm);
+                        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            tp_ms.time_since_epoch()) % std::chrono::seconds(1);
+
+                        char ts[32];
+                        std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
+                        LOG_INF("decode start: %s.%06d\n", ts, (int)ms.count());
+                    }
                     slot.t_start_generation = t_current;
                     slot.t_prompt_processing = (slot.t_start_generation - slot.t_start_process_prompt) / 1e3;
                     metrics.on_prompt_eval(slot);
