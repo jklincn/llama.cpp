@@ -305,6 +305,7 @@ llama_context::llama_context(
             LLAMA_LOG_INFO("%s: pipeline parallelism enabled (n_copies=%d)\n", __func__, ggml_backend_sched_get_n_copies(sched.get()));
         }
 
+        // 内存（KV Cache）初始化
         llama_memory_context_ptr mctx;
         if (memory) {
             LLAMA_LOG_DEBUG("%s: reserving full memory module\n", __func__);

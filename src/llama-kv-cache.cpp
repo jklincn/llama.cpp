@@ -32,6 +32,7 @@ llama_kv_cache::llama_kv_cache(
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse) :
     model(model), hparams(model.hparams), v_trans(v_trans),
+    // 如果是 unified，n_stream 设为 1，否则为 n_seq_max。因此 KV Cache 只有一份，进行共用
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type) {
 
     GGML_ASSERT(kv_size % n_pad == 0);
