@@ -57,8 +57,8 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
     counter->num_experts = experts;
     counter->expert_activation_counts.assign(layers, std::vector<int>(experts, 0));
     counter->initialized = true;
-    GGML_LOG_INFO(
-        "🚀 MoE激活计数器已初始化 (模型层数: %d 层, 每层专家数量: %d, 激活专家数: %d)\n", layers, experts, expert_used);
+    GGML_LOG_INFO("🚀 MoE激活计数器已初始化 (模型层数: %d 层, 每层专家数量: %d, 激活专家数: %d)\n", layers, experts,
+                  expert_used);
     return true;
 }
 
@@ -127,8 +127,8 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
 
     // 2. 验证张量类型 (我们期望的是包含专家索引的I32张量)
     if (t->type != GGML_TYPE_I32) {
-        GGML_LOG_WARN(
-            "⚠️  跳过张量 '%s'，因为其类型不是 I32 (而是 %s)，无法解析为专家索引。\n", t->name, ggml_type_name(t->type));
+        GGML_LOG_WARN("⚠️  跳过张量 '%s'，因为其类型不是 I32 (而是 %s)，无法解析为专家索引。\n", t->name,
+                      ggml_type_name(t->type));
         return true;
     }
 
@@ -175,7 +175,16 @@ void save_activation_report(MoeActivationCounter * counter) {
 
     counter->initialized = false;
 
-    const std::string filepath = "expert_activations.csv";
+    // 从环境变量读取 WORK_DIR
+    const char * work_dir_env = std::getenv("WORK_DIR");
+    std::string  work_dir     = work_dir_env ? work_dir_env : ".";
+
+    // 确保目录末尾有 '/'
+    if (!work_dir.empty() && work_dir.back() != '/') {
+        work_dir += "/";
+    }
+
+    const std::string filepath = work_dir + "expert_activations.csv";
 
     std::ofstream file(filepath);
     if (!file.is_open()) {
