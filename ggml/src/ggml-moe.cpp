@@ -24,7 +24,7 @@ struct MoeActivationCounter {
     int num_experts = 0;
 
     // 激活计数器
-    std::vector<std::vector<int>> expert_activation_counts;
+    std::vector<std::vector<uint64_t>> expert_activation_counts;
 
     // 用于从GPU复制数据的临时缓冲区
     std::vector<uint8_t> buffer;
@@ -55,9 +55,9 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
     }
     counter->num_layers  = layers;
     counter->num_experts = experts;
-    counter->expert_activation_counts.assign(layers, std::vector<int>(experts, 0));
+    counter->expert_activation_counts.assign(layers, std::vector<uint64_t>(experts, 0));
     counter->initialized = true;
-    GGML_LOG_INFO("🚀 MoE激活计数器已初始化 (模型层数: %d 层, 每层专家数量: %d, 激活专家数: %d)\n", layers, experts,
+    GGML_LOG_INFO("MoE激活计数器已初始化 (模型层数: %d 层, 每层专家数量: %d, 激活专家数: %d)\n", layers, experts,
                   expert_used);
     return true;
 }
@@ -121,13 +121,13 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
     // 1. 解析层索引
     int layer_idx = parse_layer_index_from_name(t->name);
     if (layer_idx < 0 || layer_idx >= counter->num_layers) {
-        GGML_LOG_ERROR("❌ 从 '%s' 解析到无效的层索引 %d。\n", t->name, layer_idx);
+        GGML_LOG_ERROR("从 '%s' 解析到无效的层索引 %d。\n", t->name, layer_idx);
         return true;  // 继续执行
     }
 
     // 2. 验证张量类型 (我们期望的是包含专家索引的I32张量)
     if (t->type != GGML_TYPE_I32) {
-        GGML_LOG_WARN("⚠️  跳过张量 '%s'，因为其类型不是 I32 (而是 %s)，无法解析为专家索引。\n", t->name,
+        GGML_LOG_WARN("跳过张量 '%s'，因为其类型不是 I32 (而是 %s)，无法解析为专家索引。\n", t->name,
                       ggml_type_name(t->type));
         return true;
     }
@@ -155,7 +155,7 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
             counter->expert_activation_counts[layer_idx][expert_idx]++;
             updated_count++;
         } else {
-            GGML_LOG_ERROR("❌ 在张量 '%s' 中发现无效的专家索引 %d。\n", t->name, expert_idx);
+            GGML_LOG_ERROR("在张量 '%s' 中发现无效的专家索引 %d。\n", t->name, expert_idx);
         }
     }
     (void) updated_count;
@@ -203,11 +203,11 @@ void save_activation_report(MoeActivationCounter * counter) {
     file << "\n";
 
     // 写入数据
-    long long total_activations = 0;
+    unsigned long long total_activations = 0;
     for (int layer = 0; layer < counter->num_layers; ++layer) {
         file << layer;
         for (int expert = 0; expert < counter->num_experts; ++expert) {
-            int cnt = counter->expert_activation_counts[layer][expert];
+            uint64_t cnt = counter->expert_activation_counts[layer][expert];
             file << "," << cnt;
             total_activations += cnt;
         }
@@ -216,9 +216,9 @@ void save_activation_report(MoeActivationCounter * counter) {
 
     file.close();
 
-    GGML_LOG_INFO("✅ 报告保存成功。\n");
+    GGML_LOG_INFO("报告保存成功。\n");
     GGML_LOG_INFO("总计 %d 层, %d 个专家/层。\n", counter->num_layers, counter->num_experts);
-    GGML_LOG_INFO("在本次运行中，总共记录到 %lld 次专家激活。\n", total_activations);
+    GGML_LOG_INFO("在本次运行中，总共记录到 %llu 次专家激活。\n", total_activations);
     GGML_LOG_INFO("执行 python scripts/expert_activation_analysis.py 进行数据分析。\n");
     GGML_LOG_INFO("==============================\n");
 }
