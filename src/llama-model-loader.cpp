@@ -796,6 +796,15 @@ const struct ggml_tensor * llama_model_loader::check_tensor_dims(const std::stri
                 break;
             }
         }
+
+        // llama_moe.is_pruned 允许维度不匹配
+        if (!is_ok) {
+            int kid = gguf_find_key(meta.get(), "llama_moe.is_pruned");
+            if (kid >= 0 && gguf_get_val_bool(meta.get(), kid)) {
+                is_ok = true;
+            }
+        }
+
         if (!is_ok) {
             throw std::runtime_error(
                     format("%s: tensor '%s' has wrong shape; expected %s, got %s",

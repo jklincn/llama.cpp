@@ -9,6 +9,7 @@
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -904,6 +905,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     const int64_t n_embd   = cur->ne[0];
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
+
+    // Check if the model is pruned (variable number of experts)
+    if (gate_inp && gate_inp->ne[1] < n_expert) {
+        n_expert = gate_inp->ne[1];
+    }
+    if (exp_probs_b && exp_probs_b->ne[0] < n_expert) {
+        n_expert = exp_probs_b->ne[0];
+    }
+
+    // 避免模型预热报错
+    n_expert_used = std::min(n_expert, n_expert_used);
 
     // 计算专家选择 logits
     ggml_tensor * logits = nullptr;
