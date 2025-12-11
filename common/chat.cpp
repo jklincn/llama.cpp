@@ -3159,7 +3159,7 @@ common_chat_msg common_chat_parse(const std::string & input, bool is_partial, co
     }
     auto msg = builder.result();
     if (!is_partial) {
-        LOG_DBG("Parsed message: %s\n", common_chat_msgs_to_json_oaicompat<json>({msg}).at(0).dump().c_str());
+        LOG_DBG("Parsed message: %s\n", common_chat_msgs_to_json_oaicompat<json>({msg}).at(0).dump(-1, ' ', false, json::error_handler_t::replace).c_str());
     }
     return msg;
 }
