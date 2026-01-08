@@ -1737,7 +1737,8 @@ struct markdown_printer : public printer {
         fields.emplace_back("params");
         fields.emplace_back("backend");
         bool is_cpu_backend = test::get_backend().find("CPU") != std::string::npos ||
-                              test::get_backend().find("BLAS") != std::string::npos;
+                              test::get_backend().find("BLAS") != std::string::npos ||
+                              test::get_backend().find("ZenDNN") != std::string::npos;
         if (!is_cpu_backend) {
             fields.emplace_back("n_gpu_layers");
         }
@@ -1919,6 +1920,12 @@ struct sql_printer : public printer {
     }
 };
 
+struct ctx_state {
+    int depth = 0; // in tokens
+
+    std::vector<uint8_t> buf; // the llama_context state buffer
+};
+
 static bool test_prompt(llama_context * ctx, int n_prompt, int n_batch, int n_threads) {
     llama_set_n_threads(ctx, n_threads, n_threads);
 
@@ -2030,7 +2037,10 @@ int main(int argc, char ** argv) {
     llama_backend_init();
     llama_numa_init(params.numa);
 
-    set_process_priority(params.prio);
+    if (!set_process_priority(params.prio)) {
+        fprintf(stderr, "%s: error: failed to set process priority\n", __func__);
+        return 1;
+    }
 
     // initialize printer
     std::unique_ptr<printer> p     = create_printer(params.output_format);
@@ -2050,6 +2060,10 @@ int main(int argc, char ** argv) {
 
     llama_model *               lmodel    = nullptr;
     const cmd_params_instance * prev_inst = nullptr;
+
+    // store the llama_context state at the previous depth that we performed a test
+    // ref: https://github.com/ggml-org/llama.cpp/pull/16944#issuecomment-3478151721
+    ctx_state cstate;
 
     int  params_idx   = 0;
     auto params_count = params_instances.size();
@@ -2091,6 +2105,8 @@ int main(int argc, char ** argv) {
         struct ggml_threadpool_params tpp = ggml_threadpool_params_default(t.n_threads);
         if (!parse_cpu_mask(t.cpu_mask, tpp.cpumask)) {
             fprintf(stderr, "%s: failed to parse cpu-mask: %s\n", __func__, t.cpu_mask.c_str());
+            llama_free(ctx);
+            llama_model_free(lmodel);
             exit(1);
         }
         tpp.strict_cpu = t.cpu_strict;
@@ -2100,6 +2116,8 @@ int main(int argc, char ** argv) {
         struct ggml_threadpool * threadpool = ggml_threadpool_new_fn(&tpp);
         if (!threadpool) {
             fprintf(stderr, "%s: threadpool create failed : n_threads %d\n", __func__, tpp.n_threads);
+            llama_free(ctx);
+            llama_model_free(lmodel);
             exit(1);
         }
 
@@ -2115,6 +2133,8 @@ int main(int argc, char ** argv) {
                 bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run prompt warmup\n", __func__);
+                    llama_free(ctx);
+                    llama_model_free(lmodel);
                     exit(1);
                 }
             }
@@ -2125,6 +2145,8 @@ int main(int argc, char ** argv) {
                 bool res = test_gen(ctx, 1, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run gen warmup\n", __func__);
+                    llama_free(ctx);
+                    llama_model_free(lmodel);
                     exit(1);
                 }
             }
@@ -2134,14 +2156,39 @@ int main(int argc, char ** argv) {
             llama_memory_clear(llama_get_memory(ctx), false);
 
             if (t.n_depth > 0) {
-                if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d\n", params_idx, params_count,
-                            i + 1, params.reps);
+                bool is_cached = t.n_depth == cstate.depth;
+
+                if (is_cached) {
+                    // if previously we have computed at this depth, just restore the state
+                    const size_t ret = llama_state_seq_set_data(ctx, cstate.buf.data(), cstate.buf.size(), 0);
+                    if (ret == 0) {
+                        // if the old state is incompatible with the current context - reprocess from scratch
+                        is_cached = false;
+                    }
                 }
-                bool res = test_prompt(ctx, t.n_depth, t.n_batch, t.n_threads);
-                if (!res) {
-                    fprintf(stderr, "%s: error: failed to run depth\n", __func__);
-                    exit(1);
+
+                if (!is_cached) {
+                    if (params.progress) {
+                        fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d\n", params_idx, params_count,
+                                i + 1, params.reps);
+                    }
+                    bool res = test_prompt(ctx, t.n_depth, t.n_batch, t.n_threads);
+                    if (!res) {
+                        fprintf(stderr, "%s: error: failed to run depth\n", __func__);
+                        llama_free(ctx);
+                        llama_model_free(lmodel);
+                        exit(1);
+                    }
+
+                    // store the context state for reuse in later runs
+                    cstate.depth = t.n_depth;
+                    cstate.buf.resize(llama_state_seq_get_size(ctx, 0));
+                    llama_state_seq_get_data(ctx, cstate.buf.data(), cstate.buf.size(), 0);
+                } else {
+                    if (params.progress) {
+                        fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d (cached)\n", params_idx, params_count,
+                                i + 1, params.reps);
+                    }
                 }
             }
 
@@ -2155,6 +2202,8 @@ int main(int argc, char ** argv) {
                 bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run prompt\n", __func__);
+                    llama_free(ctx);
+                    llama_model_free(lmodel);
                     exit(1);
                 }
             }
@@ -2166,6 +2215,8 @@ int main(int argc, char ** argv) {
                 bool res = test_gen(ctx, t.n_gen, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run gen\n", __func__);
+                    llama_free(ctx);
+                    llama_model_free(lmodel);
                     exit(1);
                 }
             }
