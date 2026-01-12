@@ -27,20 +27,20 @@ struct MoeActivationCounter {
     // 激活计数器
     std::vector<std::vector<uint64_t>> expert_activation_counts;
     // 激活权重累加器
-    std::vector<std::vector<double>> expert_activation_weights;
+    std::vector<std::vector<double>>   expert_activation_weights;
 
     // 临时缓冲：用于匹配同一层的 topk 和 weights
     struct LayerData {
         std::vector<int32_t> indices;
         std::vector<float>   weights;
     };
+
     std::map<int, LayerData> layer_buffers;
 
     // 用于从GPU复制数据的临时缓冲区
     std::vector<uint8_t> buffer;
 
-    bool initialized = false;
-    bool enabled = true;
+    bool enabled     = true;
 
     MoeActivationCounter()  = default;
     ~MoeActivationCounter() = default;
@@ -68,7 +68,6 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
     counter->num_experts = experts;
     counter->expert_activation_counts.assign(layers, std::vector<uint64_t>(experts, 0));
     counter->expert_activation_weights.assign(layers, std::vector<double>(experts, 0.0));
-    counter->initialized = true;
 
     const char * env_p = std::getenv("LLAMA_MOE_COUNTER");
     if (env_p && strcmp(env_p, "0") == 0) {
@@ -77,7 +76,7 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
     } else {
         counter->enabled = true;
         GGML_LOG_INFO("MoE激活计数器已启用 (模型层数: %d 层, 每层专家数量: %d, 激活专家数: %d)\n", layers, experts,
-                  expert_used);
+                      expert_used);
     }
     return true;
 }
@@ -90,8 +89,10 @@ void destroy_moe_activation_counter(MoeActivationCounter * counter) {
 
 static bool is_target_tensor(const char * tensor_name);
 static int  parse_layer_index_from_name(const char * tensor_name);
-static void accumulate_weights(MoeActivationCounter * counter, int layer_idx, const std::vector<int32_t> & indices,
-                               const std::vector<float> & weights);
+static void accumulate_weights(MoeActivationCounter *       counter,
+                               int                          layer_idx,
+                               const std::vector<int32_t> & indices,
+                               const std::vector<float> &   weights);
 
 // --- Function Implementations ---
 
@@ -107,21 +108,27 @@ static bool is_target_tensor(const char * tensor_name) {
     // 排除 sum, norm, scaled, softmax 等后缀，尽量只匹配基础的 weights 张量
     // 注意：不同模型架构命名可能不同，这里尽量通用
     if (strstr(tensor_name, "ffn_moe_weights") != nullptr) {
-        if (strstr(tensor_name, "sum") != nullptr)
+        if (strstr(tensor_name, "sum") != nullptr) {
             return false;
-        if (strstr(tensor_name, "norm") != nullptr)
+        }
+        if (strstr(tensor_name, "norm") != nullptr) {
             return false;
-        if (strstr(tensor_name, "scaled") != nullptr)
+        }
+        if (strstr(tensor_name, "scaled") != nullptr) {
             return false;
-        if (strstr(tensor_name, "softmax") != nullptr)
+        }
+        if (strstr(tensor_name, "softmax") != nullptr) {
             return false;
+        }
         return true;
     }
     return false;
 }
 
-static void accumulate_weights(MoeActivationCounter * counter, int layer_idx, const std::vector<int32_t> & indices,
-                               const std::vector<float> & weights) {
+static void accumulate_weights(MoeActivationCounter *       counter,
+                               int                          layer_idx,
+                               const std::vector<int32_t> & indices,
+                               const std::vector<float> &   weights) {
     if (indices.size() != weights.size()) {
         GGML_LOG_WARN("Layer %d: indices size %zu != weights size %zu\n", layer_idx, indices.size(), weights.size());
         return;
@@ -142,8 +149,8 @@ static int parse_layer_index_from_name(const char * tensor_name) {
     try {
         // 使用正则表达式查找第一个出现的数字序列
         static const std::regex re("\\d+");
-        std::smatch match;
-        std::string s(tensor_name);
+        std::smatch             match;
+        std::string             s(tensor_name);
         if (std::regex_search(s, match, re)) {
             return std::stoi(match.str(0));
         }
@@ -160,7 +167,7 @@ static int parse_layer_index_from_name(const char * tensor_name) {
 bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     auto * counter = (MoeActivationCounter *) user_data;
 
-    if (!counter || !counter->initialized) {
+    if (!counter) {
         return false;
     }
 
@@ -266,16 +273,13 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
  * 将收集到的激活次数统计数据保存到CSV文件中。
  */
 void save_activation_report(MoeActivationCounter * counter) {
-    if (!counter || !counter->initialized) {
+    if (!counter) {
+        return;
+    }
+    
     if (!counter->enabled) {
         return;
     }
-
-        GGML_LOG_ERROR("%s: 计数器未初始化。\n", __func__);
-        return;
-    }
-
-    counter->initialized = false;
 
     // 从环境变量读取 WORK_DIR
     const char * work_dir_env = std::getenv("WORK_DIR");
@@ -320,7 +324,7 @@ void save_activation_report(MoeActivationCounter * counter) {
 
     // 保存权重报告
     const std::string weights_filepath = work_dir + "expert_weights.csv";
-    std::ofstream wfile(weights_filepath);
+    std::ofstream     wfile(weights_filepath);
     if (wfile.is_open()) {
         GGML_LOG_INFO("正在保存权重报告到: %s\n", weights_filepath.c_str());
         wfile << "layer_index";
