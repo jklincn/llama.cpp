@@ -40,7 +40,8 @@ struct MoeActivationCounter {
     // 用于从GPU复制数据的临时缓冲区
     std::vector<uint8_t> buffer;
 
-    bool enabled     = true;
+    // 默认为禁用，直到 setup 被调用。防止在 setup 之前（如 warmup）触发回调报错
+    bool enabled = false;
 
     MoeActivationCounter()  = default;
     ~MoeActivationCounter() = default;
@@ -57,6 +58,8 @@ MoeActivationCounter * create_moe_activation_counter() {
 }
 
 bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, int experts, int expert_used) {
+    (void) expert_used;
+
     if (!counter) {
         return false;
     }
@@ -70,13 +73,11 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
     counter->expert_activation_weights.assign(layers, std::vector<double>(experts, 0.0));
 
     const char * env_p = std::getenv("LLAMA_MOE_COUNTER");
-    if (env_p && strcmp(env_p, "0") == 0) {
-        counter->enabled = false;
-        GGML_LOG_INFO("MoE激活计数器已禁用 (LLAMA_MOE_COUNTER=0)\n");
-    } else {
+    if (env_p && strcmp(env_p, "1") == 0) {
         counter->enabled = true;
-        GGML_LOG_INFO("MoE激活计数器已启用 (模型层数: %d 层, 每层专家数量: %d, 激活专家数: %d)\n", layers, experts,
-                      expert_used);
+        GGML_LOG_INFO("MoE激活计数器已启用 (LLAMA_MOE_COUNTER=1)\n");
+    } else {
+        GGML_LOG_INFO("MoE激活计数器已禁用 (LLAMA_MOE_COUNTER=0)\n");
     }
     return true;
 }
@@ -276,7 +277,7 @@ void save_activation_report(MoeActivationCounter * counter) {
     if (!counter) {
         return;
     }
-    
+
     if (!counter->enabled) {
         return;
     }
