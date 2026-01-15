@@ -5,25 +5,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstddef>
 #include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
 
-// NOTE: in this build setup, GGML_USE_CUDA may only be defined for CUDA compilation units.
-// We still want to use the CUDA runtime from this .cpp for GPU-side accumulation.
-// Some toolchains don't add the CUDA include path for C++ targets, so we provide a minimal
-// fallback declaration set if <cuda_runtime.h> is not available.
-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-#if defined(__has_include)
-#if __has_include(<cuda_runtime.h>)
-#define LLAMA_MOE_HAVE_CUDA_RUNTIME 1
-#include <cuda_runtime.h>
-#endif
-#endif
-
-#if !defined(LLAMA_MOE_HAVE_CUDA_RUNTIME)
-#define LLAMA_MOE_HAVE_CUDA_RUNTIME 1
+// llama.moe: CUDA-only
+// We intentionally avoid including <cuda_runtime.h> here to keep this translation unit
+// independent of CUDA include paths (some build setups don't propagate them to C++ units).
+// Instead, declare the minimal CUDA Runtime APIs we use; symbols are resolved via cudart.
 extern "C" {
     typedef int cudaError_t;
 
@@ -46,8 +37,6 @@ enum {
 };
 
 static constexpr cudaError_t cudaSuccess = 0;
-#endif
-#endif
 
 /**
  * @struct MoeActivationCounter
@@ -67,11 +56,9 @@ struct MoeActivationCounter {
     // 构图阶段是否实际插入过 GGML_OP_MOE_COUNTER（用于 sanity check）
     int gpu_op_nodes_built = 0;
 
-#if defined(LLAMA_MOE_HAVE_CUDA_RUNTIME)
     int cuda_device = 0;
     uint64_t * d_counts  = nullptr; // [num_layers * num_experts]
     double   * d_weights = nullptr; // [num_layers * num_experts]
-#endif
 
     MoeActivationCounter()  = default;
     ~MoeActivationCounter() = default;
@@ -111,7 +98,6 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
         return true;
     }
 
-#if defined(LLAMA_MOE_HAVE_CUDA_RUNTIME)
     cudaError_t cerr = cudaGetDevice(&counter->cuda_device);
     if (cerr != cudaSuccess) {
         GGML_LOG_ERROR("setup_moe_activation_counter: cudaGetDevice 失败: %s\n", cudaGetErrorString(cerr));
@@ -159,11 +145,6 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
 
     counter->use_gpu_op = true;
     GGML_LOG_INFO("MoE激活计数器 GPU 模式已启用\n");
-#else
-    counter->use_gpu_op = false;
-    GGML_LOG_ERROR("MoE激活计数器已启用，但当前构建不支持 CUDA runtime，无法工作。\n");
-    return false;
-#endif
     return true;
 }
 
@@ -172,7 +153,6 @@ bool moe_activation_counter_use_gpu_op(MoeActivationCounter * counter) {
 }
 
 void destroy_moe_activation_counter(MoeActivationCounter * counter) {
-#if defined(LLAMA_MOE_HAVE_CUDA_RUNTIME)
     if (counter) {
         if (counter->d_counts) {
             cudaFree(counter->d_counts);
@@ -183,7 +163,6 @@ void destroy_moe_activation_counter(MoeActivationCounter * counter) {
             counter->d_weights = nullptr;
         }
     }
-#endif
     delete counter;
 }
 
@@ -250,7 +229,6 @@ void save_activation_report(MoeActivationCounter * counter) {
     std::vector<uint64_t> dev_counts;
     std::vector<double>   dev_weights;
 
-#if defined(LLAMA_MOE_HAVE_CUDA_RUNTIME)
     if (counter->use_gpu_op && counter->d_counts && counter->d_weights) {
         const size_t n = (size_t) counter->num_layers * (size_t) counter->num_experts;
         dev_counts.resize(n);
@@ -277,7 +255,6 @@ void save_activation_report(MoeActivationCounter * counter) {
             dev_weights.clear();
         }
     }
-#endif
 
     // 写入CSV表头
     file << "layer_index";
@@ -359,12 +336,10 @@ struct ggml_tensor * ggml_moe_counter(
     uintptr_t p_counts  = 0;
     uintptr_t p_weights = 0;
 
-#if defined(LLAMA_MOE_HAVE_CUDA_RUNTIME)
     if (counter && counter->enabled && counter->use_gpu_op) {
         p_counts  = (uintptr_t) counter->d_counts;
         p_weights = (uintptr_t) counter->d_weights;
     }
-#endif
 
     ggml_set_op_params_i32(result, 2, (int32_t) (p_counts & 0xffffffffu));
     ggml_set_op_params_i32(result, 3, (int32_t) ((uint64_t) p_counts >> 32));
