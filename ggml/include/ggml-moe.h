@@ -31,6 +31,9 @@ MoeActivationCounter * create_moe_activation_counter();
 
 bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, int experts, int expert_used);
 
+// returns whether this counter instance is using the GPU-side GGML_OP_MOE_COUNTER path
+bool moe_activation_counter_use_gpu_op(MoeActivationCounter * counter);
+
 
 /**
  * @brief 销毁 MoE 激活计数器实例并释放所有相关资源。
@@ -62,6 +65,19 @@ bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * us
  * @param output_dir 一个C字符串，指定用于存放报告文件的目录路径。
  */
 void save_activation_report(MoeActivationCounter * counter);
+
+// Build a side-effect ggml op that accumulates MoE expert activations/weights.
+// Intended to be inserted from llama graph build code (e.g. in build_moe_ffn).
+//
+// selected_experts: I32 [n_expert_used, n_tokens]
+// weights:          F32 [1, n_expert_used, n_tokens]
+// layer_idx:        block/layer index (il)
+struct ggml_tensor * ggml_moe_counter(
+	struct ggml_context * ctx,
+	struct ggml_tensor  * selected_experts,
+	struct ggml_tensor  * weights,
+	MoeActivationCounter * counter,
+	int32_t layer_idx);
 
 
 #ifdef __cplusplus

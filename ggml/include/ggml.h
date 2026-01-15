@@ -567,6 +567,9 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        // llama.moe: accumulate MoE expert activations/weights (side-effect op)
+        GGML_OP_MOE_COUNTER,
+
         GGML_OP_COUNT,
     };
 

@@ -4,6 +4,8 @@
 #include "llama-batch.h"
 #include "llama-cparams.h"
 
+#include "ggml-moe.h"
+
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
 #include "llama-memory-hybrid.h"
@@ -1187,6 +1189,42 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     //call early so that topk-moe can be used
     ggml_build_forward_expand(gf, weights);
+
+    // llama.moe: in-GPU MoE counter (avoid per-tensor device->host copies)
+    if (cparams.cb_eval == moe_activation_counter_callback && cparams.cb_eval_user_data != nullptr) {
+        auto * moe_counter = (MoeActivationCounter *) cparams.cb_eval_user_data;
+        if (moe_activation_counter_use_gpu_op(moe_counter)) {
+            ggml_tensor * t_counter = ggml_moe_counter(ctx0, selected_experts, weights, moe_counter, il);
+            cb(t_counter, "ffn_moe_counter", il);
+
+            // Ensure the side-effect op runs on the accelerator backend.
+            // Without this, the scheduler may place the MOE_COUNTER node on CPU (no-op),
+            // resulting in 0 activations even when inputs are on CUDA.
+            if (sched) {
+                ggml_backend_t backend_pref = nullptr;
+                const int n_backends = ggml_backend_sched_get_n_backends(sched);
+                for (int i = 0; i < n_backends; ++i) {
+                    ggml_backend_t b = ggml_backend_sched_get_backend(sched, i);
+                    if (!b) {
+                        continue;
+                    }
+                    const char * name = ggml_backend_name(b);
+                    if (name && std::strncmp(name, "CUDA", 4) == 0) {
+                        backend_pref = b;
+                        break;
+                    }
+                    if (name && std::strcmp(name, "CPU") != 0 && backend_pref == nullptr) {
+                        backend_pref = b;
+                    }
+                }
+                if (backend_pref) {
+                    ggml_backend_sched_set_tensor_backend(sched, t_counter, backend_pref);
+                }
+            }
+
+            ggml_build_forward_expand(gf, t_counter);
+        }
+    }
 
     // 输入张量重塑
     // 形状: [n_embd, n_tokens] → [n_embd, 1, n_tokens]

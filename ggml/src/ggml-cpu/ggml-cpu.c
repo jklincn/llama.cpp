@@ -2009,6 +2009,11 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_glu(params, tensor);
             } break;
+        case GGML_OP_MOE_COUNTER:
+            {
+                // side-effect op used by llama.moe; CPU path is intentionally a no-op
+                // (CUDA backend implements the accumulation)
+            } break;
         case GGML_OP_GET_REL_POS:
             {
                 ggml_compute_forward_get_rel_pos(params, tensor);
@@ -2207,6 +2212,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_SUM_ROWS:
         case GGML_OP_MEAN:
         case GGML_OP_ARGMAX:
+            {
+                n_tasks = 1;
+            } break;
+        case GGML_OP_MOE_COUNTER:
             {
                 n_tasks = 1;
             } break;

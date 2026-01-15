@@ -49,6 +49,7 @@
 #include "ggml-cuda/mean.cuh"
 #include "ggml-cuda/tsembd.cuh"
 #include "ggml-cuda/topk-moe.cuh"
+#include "ggml-cuda/moe-counter.cuh"
 #include "ggml-cuda/unary.cuh"
 #include "ggml-cuda/upscale.cuh"
 #include "ggml-cuda/wkv.cuh"
@@ -2569,6 +2570,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 default:
                     return false;
             }
+            break;
+        case GGML_OP_MOE_COUNTER:
+            ggml_cuda_op_moe_counter(ctx, dst);
             break;
         case GGML_OP_NORM:
             ggml_cuda_op_norm(ctx, dst);
