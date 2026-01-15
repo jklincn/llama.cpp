@@ -5,9 +5,6 @@
 #include "ggml.h"
 
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 
 // llama.moe: GGML_OP_MOE_COUNTER
 //
@@ -69,20 +66,6 @@ static inline void ggml_cuda_op_moe_counter(ggml_backend_cuda_context & ctx, ggm
 	const ggml_tensor * selected = dst->src[0];
 	const ggml_tensor * weights  = dst->src[1];
 
-	static bool dbg_inited = false;
-	static bool dbg_enabled = false;
-	static int  dbg_left = 0;
-	if (!dbg_inited) {
-		dbg_inited = true;
-		const char * env_dbg = std::getenv("LLAMA_MOE_COUNTER_DEBUG");
-		dbg_enabled = env_dbg && std::strcmp(env_dbg, "1") == 0;
-		if (dbg_enabled) {
-			const char * env_lim = std::getenv("LLAMA_MOE_COUNTER_DEBUG_LIMIT");
-			dbg_left = env_lim ? std::atoi(env_lim) : 16;
-			if (dbg_left < 0) dbg_left = 0;
-		}
-	}
-
 	if (!selected || !weights) {
 		return;
 	}
@@ -98,13 +81,6 @@ static inline void ggml_cuda_op_moe_counter(ggml_backend_cuda_context & ctx, ggm
 	const uint64_t d_weights_u64 = ggml_moe_counter_get_u64_op_param(dst, 4);
 
 	if (d_counts_u64 == 0 || d_weights_u64 == 0) {
-		if (dbg_enabled && dbg_left-- > 0) {
-			fprintf(stderr,
-				"[moe-counter dbg] cuda op: pointers are null layer=%d n_experts=%d d_counts=0x%llx d_weights=0x%llx\n",
-				(int) layer_idx, (int) n_experts,
-				(unsigned long long) d_counts_u64,
-				(unsigned long long) d_weights_u64);
-		}
 		return;
 	}
 
@@ -115,16 +91,6 @@ static inline void ggml_cuda_op_moe_counter(ggml_backend_cuda_context & ctx, ggm
 	const int64_t n_tokens      = selected->ne[1];
 	if (n_expert_used <= 0 || n_tokens <= 0) {
 		return;
-	}
-
-	if (dbg_enabled && dbg_left-- > 0) {
-		fprintf(stderr,
-			"[moe-counter dbg] cuda op: layer=%d n_experts=%d n_expert_used=%lld n_tokens=%lld sel_type=%d w_type=%d d_counts=0x%llx d_weights=0x%llx\n",
-			(int) layer_idx, (int) n_experts,
-			(long long) n_expert_used, (long long) n_tokens,
-			(int) selected->type, (int) weights->type,
-			(unsigned long long) d_counts_u64,
-			(unsigned long long) d_weights_u64);
 	}
 
 	const int64_t n = n_expert_used * n_tokens;
