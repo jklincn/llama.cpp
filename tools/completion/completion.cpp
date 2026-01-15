@@ -134,9 +134,14 @@ int main(int argc, char ** argv) {
     // numa 初始化
     llama_numa_init(params.numa);
 
-    MoeActivationCounter* moe_counter = create_moe_activation_counter();
-    params.cb_eval = moe_activation_counter_callback;
-    params.cb_eval_user_data = moe_counter;
+    MoeActivationCounter * moe_counter = nullptr;
+    {
+        const char * env_p = std::getenv("LLAMA_MOE_COUNTER");
+        if (env_p && std::strcmp(env_p, "1") == 0) {
+            moe_counter = create_moe_activation_counter();
+            params.cb_eval_user_data = moe_counter;
+        }
+    }
 
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
@@ -165,10 +170,11 @@ int main(int argc, char ** argv) {
 
     const int n_layer = llama_model_n_layer(model);
     const int n_expert = llama_model_n_expert(model);
-    const int n_expert_used = llama_model_n_expert_used(model);
-    if (!setup_moe_activation_counter(moe_counter, n_layer, n_expert, n_expert_used)) {
-        fprintf(stderr, "Failed to initialize MoE activation counter.\n");
-        return 1;
+    if (moe_counter) {
+        if (!setup_moe_activation_counter(moe_counter, n_layer, n_expert)) {
+            fprintf(stderr, "Failed to initialize MoE activation counter.\n");
+            return 1;
+        }
     }
 
     llama_memory_t mem = llama_get_memory(ctx);

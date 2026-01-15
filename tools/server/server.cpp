@@ -106,9 +106,14 @@ int main(int argc, char ** argv) {
     llama_backend_init();
     llama_numa_init(params.numa);
 
-    MoeActivationCounter* moe_counter = create_moe_activation_counter();
-    params.cb_eval = moe_activation_counter_callback;
-    params.cb_eval_user_data = moe_counter;
+    MoeActivationCounter * moe_counter = nullptr;
+    {
+        const char * env_p = std::getenv("LLAMA_MOE_COUNTER");
+        if (env_p && std::strcmp(env_p, "1") == 0) {
+            moe_counter = create_moe_activation_counter();
+            params.cb_eval_user_data = moe_counter;
+        }
+    }
 
     LOG_INF("system info: n_threads = %d, n_threads_batch = %d, total_threads = %d\n", params.cpuparams.n_threads, params.cpuparams_batch.n_threads, std::thread::hardware_concurrency());
     LOG_INF("\n");
@@ -267,11 +272,12 @@ int main(int argc, char ** argv) {
             const auto * model = llama_get_model(ctx);
             const int n_layer = llama_model_n_layer(model);
             const int n_expert = llama_model_n_expert(model);
-            const int n_expert_used = llama_model_n_expert_used(model);
-            if (!setup_moe_activation_counter(moe_counter, n_layer, n_expert, n_expert_used)) {
-                LOG_ERR("Failed to initialize MoE activation counter.\n");
-                clean_up();
-                return 1;
+            if (moe_counter) {
+                if (!setup_moe_activation_counter(moe_counter, n_layer, n_expert)) {
+                    LOG_ERR("Failed to initialize MoE activation counter.\n");
+                    clean_up();
+                    return 1;
+                }
             }
         }
 
@@ -280,8 +286,10 @@ int main(int argc, char ** argv) {
         shutdown_handler = [&](int) {
             // this will unblock start_loop()
             ctx_server.terminate();
-            save_activation_report(moe_counter);
-            destroy_moe_activation_counter(moe_counter);
+            if (moe_counter) {
+                save_activation_report(moe_counter);
+                destroy_moe_activation_counter(moe_counter);
+            }
         };
     }
 

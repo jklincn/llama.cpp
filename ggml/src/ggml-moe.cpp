@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstring>
 #include <fstream>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -47,15 +48,6 @@ struct MoeActivationCounter {
     int num_layers  = 0;
     int num_experts = 0;
 
-    // 默认为禁用，直到 setup 被调用。防止在 setup 之前（如 warmup）触发回调报错
-    bool enabled = false;
-
-    // 是否启用 GGML_OP_MOE_COUNTER 路径（GPU侧累加，save时一次性回传）
-    bool use_gpu_op = false;
-
-    // 构图阶段是否实际插入过 GGML_OP_MOE_COUNTER（用于 sanity check）
-    int gpu_op_nodes_built = 0;
-
     int cuda_device = 0;
     uint64_t * d_counts  = nullptr; // [num_layers * num_experts]
     double   * d_weights = nullptr; // [num_layers * num_experts]
@@ -74,8 +66,7 @@ MoeActivationCounter * create_moe_activation_counter() {
     return counter;
 }
 
-bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, int experts, int expert_used) {
-    (void) expert_used;
+bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, int experts) {
 
     if (!counter) {
         return false;
@@ -86,22 +77,10 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
     }
     counter->num_layers  = layers;
     counter->num_experts = experts;
-    counter->gpu_op_nodes_built = 0;
-
-    const char * env_p = std::getenv("LLAMA_MOE_COUNTER");
-    if (env_p && strcmp(env_p, "1") == 0) {
-        counter->enabled = true;
-        GGML_LOG_INFO("MoE激活计数器已启用 (LLAMA_MOE_COUNTER=1)\n");
-    } else {
-        counter->enabled = false;
-        GGML_LOG_INFO("MoE激活计数器已禁用 (LLAMA_MOE_COUNTER=0)\n");
-        return true;
-    }
 
     cudaError_t cerr = cudaGetDevice(&counter->cuda_device);
     if (cerr != cudaSuccess) {
         GGML_LOG_ERROR("setup_moe_activation_counter: cudaGetDevice 失败: %s\n", cudaGetErrorString(cerr));
-        counter->use_gpu_op = false;
         return false;
     }
 
@@ -128,7 +107,6 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
             cudaFree(counter->d_weights);
             counter->d_weights = nullptr;
         }
-        counter->use_gpu_op = false;
         return false;
     }
 
@@ -143,13 +121,8 @@ bool setup_moe_activation_counter(MoeActivationCounter * counter, int layers, in
         return false;
     }
 
-    counter->use_gpu_op = true;
     GGML_LOG_INFO("MoE激活计数器 GPU 模式已启用\n");
     return true;
-}
-
-bool moe_activation_counter_use_gpu_op(MoeActivationCounter * counter) {
-    return counter && counter->enabled && counter->use_gpu_op;
 }
 
 void destroy_moe_activation_counter(MoeActivationCounter * counter) {
@@ -166,42 +139,11 @@ void destroy_moe_activation_counter(MoeActivationCounter * counter) {
     delete counter;
 }
 
-// --- Helper function prototypes (internal to this file) ---
-
-// --- Function Implementations ---
-
-/**
- * MoE 专家激活计数回调函数
- */
-bool moe_activation_counter_callback(struct ggml_tensor * t, bool ask, void * user_data) {
-    auto * counter = (MoeActivationCounter *) user_data;
-
-    if (!counter) {
-        return false;
-    }
-
-    if (!counter->enabled) {
-        return false;
-    }
-
-    // 清理：不再使用 CPU 回调统计（避免任何逐步 D2H）。
-    // 计数由 GGML_OP_MOE_COUNTER 在 CUDA backend 中完成。
-    GGML_UNUSED(t);
-    if (ask) {
-        return false;
-    }
-    return true;
-}
-
 /**
  * 将收集到的激活次数统计数据保存到CSV文件中。
  */
 void save_activation_report(MoeActivationCounter * counter) {
     if (!counter) {
-        return;
-    }
-
-    if (!counter->enabled) {
         return;
     }
 
@@ -229,7 +171,7 @@ void save_activation_report(MoeActivationCounter * counter) {
     std::vector<uint64_t> dev_counts;
     std::vector<double>   dev_weights;
 
-    if (counter->use_gpu_op && counter->d_counts && counter->d_weights) {
+    if (counter->d_counts && counter->d_weights) {
         const size_t n = (size_t) counter->num_layers * (size_t) counter->num_experts;
         dev_counts.resize(n);
         dev_weights.resize(n);
@@ -307,10 +249,6 @@ void save_activation_report(MoeActivationCounter * counter) {
     GGML_LOG_INFO("在本次运行中，总共记录到 %llu 次专家激活。\n", total_activations);
     GGML_LOG_INFO("执行 python scripts/expert_activation_analysis.py 进行数据分析。\n");
 
-    if (counter->enabled && counter->use_gpu_op && counter->gpu_op_nodes_built == 0) {
-        GGML_LOG_WARN("MoE激活计数器已启用，但未构建任何 MOE_COUNTER 节点；报告可能为 0。\n");
-    }
-
     GGML_LOG_INFO("==============================\n");
 }
 
@@ -336,7 +274,7 @@ struct ggml_tensor * ggml_moe_counter(
     uintptr_t p_counts  = 0;
     uintptr_t p_weights = 0;
 
-    if (counter && counter->enabled && counter->use_gpu_op) {
+    if (counter && counter->d_counts && counter->d_weights) {
         p_counts  = (uintptr_t) counter->d_counts;
         p_weights = (uintptr_t) counter->d_weights;
     }
@@ -345,10 +283,6 @@ struct ggml_tensor * ggml_moe_counter(
     ggml_set_op_params_i32(result, 3, (int32_t) ((uint64_t) p_counts >> 32));
     ggml_set_op_params_i32(result, 4, (int32_t) (p_weights & 0xffffffffu));
     ggml_set_op_params_i32(result, 5, (int32_t) ((uint64_t) p_weights >> 32));
-
-    if (counter) {
-        counter->gpu_op_nodes_built++;
-    }
 
     return result;
 }

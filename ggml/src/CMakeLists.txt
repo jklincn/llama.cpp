@@ -460,6 +460,17 @@ ggml_add_backend(OpenCL)
 ggml_add_backend(Hexagon)
 ggml_add_backend(ZenDNN)
 
+# llama.moe: ggml-moe.cpp uses CUDA Runtime APIs; ensure ggml-base links against cudart
+# NOTE: CUDAToolkit is typically discovered in ggml-cuda/, but ggml-base also needs it.
+if (GGML_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    if (GGML_STATIC)
+        target_link_libraries(ggml-base PRIVATE CUDA::cudart_static)
+    else()
+        target_link_libraries(ggml-base PRIVATE CUDA::cudart)
+    endif()
+endif()
+
 foreach (target ggml-base ggml)
     target_include_directories(${target} PUBLIC    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include> $<INSTALL_INTERFACE:include>)
     target_compile_features   (${target} PRIVATE c_std_11 cxx_std_17) # don't bump
