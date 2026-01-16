@@ -1309,10 +1309,12 @@ private:
         }
 
         if (llama_vocab_is_eog(vocab, result.tok)) {
-            slot.stop           = STOP_TYPE_EOS;
-            slot.has_next_token = false;
+            if (!slot.task->params.sampling.ignore_eos) {
+                slot.stop           = STOP_TYPE_EOS;
+                slot.has_next_token = false;
 
-            SLT_DBG(slot, "%s", "stopped by EOS\n");
+                SLT_DBG(slot, "%s", "stopped by EOS\n");
+            }
         }
 
         SLT_DBG(slot, "n_decoded = %d, n_remaining = %d, next token: %5d '%s'\n", slot.n_decoded, slot.n_remaining, result.tok, token_str.c_str());

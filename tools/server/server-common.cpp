@@ -1039,8 +1039,13 @@ json oaicompat_chat_params_parse(
     llama_params["grammar_triggers"] = grammar_triggers;
     llama_params["preserved_tokens"] = chat_params.preserved_tokens;
     llama_params["thinking_forced_open"]     = chat_params.thinking_forced_open;
-    for (const auto & stop : chat_params.additional_stops) {
-        llama_params["stop"].push_back(stop);
+    // Only add template-provided stop sequences when the request did not explicitly set `stop`.
+    // This allows callers to disable template stops by sending `"stop": []`.
+    const bool stop_explicit = body.contains("stop") && !body.at("stop").is_null();
+    if (!stop_explicit) {
+        for (const auto & stop : chat_params.additional_stops) {
+            llama_params["stop"].push_back(stop);
+        }
     }
     if (!chat_params.parser.empty()) {
         llama_params["chat_parser"] = chat_params.parser;
